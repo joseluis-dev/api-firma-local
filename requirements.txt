@@ -16,5 +16,12 @@ pyscard==2.3.0
 
 requests==2.32.3
 
+# Bandeja y UI nativa (Windows)
+pystray>=0.19.5
+Pillow>=10.0
+
 pytest==8.3.4
 httpx==0.28.1
+
+# Empaquetado (opcional, instalar solo en build machine)
+# pyinstaller>=6.10.0

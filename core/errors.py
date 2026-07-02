@@ -23,6 +23,14 @@ class ErrorCode(str, Enum):
     TIMEOUT = "TIMEOUT"
     USER_CANCELLED = "USER_CANCELLED"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    # Codigos de seguridad y emparejamiento
+    AUTH_REQUIRED = "AUTH_REQUIRED"
+    AUTH_FORBIDDEN = "AUTH_FORBIDDEN"
+    TOKEN_EXPIRED = "TOKEN_EXPIRED"
+    TOKEN_REVOKED = "TOKEN_REVOKED"
+    REPLAY_DETECTED = "REPLAY_DETECTED"
+    ORIGIN_NOT_ALLOWED = "ORIGIN_NOT_ALLOWED"
+    HOST_NOT_ALLOWED = "HOST_NOT_ALLOWED"
 
 
 class LocalApiError(Exception):
@@ -115,6 +123,41 @@ class UserCancelledError(LocalApiError):
     code = ErrorCode.USER_CANCELLED
 
 
+class AuthRequiredError(LocalApiError):
+    status_code = 401
+    code = ErrorCode.AUTH_REQUIRED
+
+
+class AuthForbiddenError(LocalApiError):
+    status_code = 403
+    code = ErrorCode.AUTH_FORBIDDEN
+
+
+class TokenExpiredError(LocalApiError):
+    status_code = 401
+    code = ErrorCode.TOKEN_EXPIRED
+
+
+class TokenRevokedError(LocalApiError):
+    status_code = 401
+    code = ErrorCode.TOKEN_REVOKED
+
+
+class ReplayDetectedError(LocalApiError):
+    status_code = 409
+    code = ErrorCode.REPLAY_DETECTED
+
+
+class OriginNotAllowedError(LocalApiError):
+    status_code = 403
+    code = ErrorCode.ORIGIN_NOT_ALLOWED
+
+
+class HostNotAllowedError(LocalApiError):
+    status_code = 403
+    code = ErrorCode.HOST_NOT_ALLOWED
+
+
 # Re-export local aliases used elsewhere
 __all__ = [
     "ErrorCode",
@@ -132,6 +175,13 @@ __all__ = [
     "TimeoutError_",
     "UserCancelledError",
     "LocalApiUnavailableError",
+    "AuthRequiredError",
+    "AuthForbiddenError",
+    "TokenExpiredError",
+    "TokenRevokedError",
+    "ReplayDetectedError",
+    "OriginNotAllowedError",
+    "HostNotAllowedError",
 ]
 
 
