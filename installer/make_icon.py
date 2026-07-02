@@ -68,6 +68,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    from __future__ import annotations  # noqa: F401
     import sys
+
     sys.exit(main())

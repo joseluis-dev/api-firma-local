@@ -5,7 +5,6 @@ Uso:
 """
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 import sys
@@ -16,12 +15,24 @@ ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "installer" / "build"
 DIST = ROOT / "installer" / "dist"
 SPEC = ROOT / "installer" / "gadsign_localapi.spec"
+ICON = ROOT / "resources" / "gadsign.ico"
+
+
+def ensure_icon() -> None:
+    if ICON.exists():
+        return
+    from make_icon import make_ico
+
+    ICON.parent.mkdir(parents=True, exist_ok=True)
+    make_ico(ICON)
+    print(f"Icono generado: {ICON}")
 
 
 def main() -> int:
     if not SPEC.exists():
         print(f"No se encuentra {SPEC}")
         return 1
+    ensure_icon()
     if BUILD.exists():
         shutil.rmtree(BUILD)
     if DIST.exists():

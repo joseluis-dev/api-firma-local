@@ -24,29 +24,38 @@ import time
 import webbrowser
 from typing import Optional
 
-from .app import app
-from .config import settings
-from .core.config_store import config_store
-from .core.drivers.factory import has_real_driver, list_available_providers
-from .core.security.pairing import pairing_manager
-from .core.token_service import _pin_cache, _cert_cache
-from .core.user_paths import logs_dir, user_data_dir
+from ..app import app
+from ..config import settings
+from ..core.config_store import config_store
+from ..core.drivers.factory import has_real_driver, list_available_providers
+from ..core.security.pairing import pairing_manager
+from ..core.token_service import _pin_cache
+from ..core.user_paths import logs_dir
 
 
 log = logging.getLogger(__name__)
+_server_thread: threading.Thread | None = None
 
 
 def _run_uvicorn() -> None:
     import uvicorn
 
     uvicorn.run(
-        "localapi.app:app",
+        app,
         host=settings.host,
         port=settings.port,
         log_level=settings.log_level.lower(),
         access_log=False,
         server_header=False,
     )
+
+
+def _start_server_thread() -> None:
+    global _server_thread
+    if _server_thread and _server_thread.is_alive():
+        return
+    _server_thread = threading.Thread(target=_run_uvicorn, daemon=True)
+    _server_thread.start()
 
 
 def _status_text() -> str:
@@ -89,6 +98,7 @@ def _revoke_origin_interactive() -> Optional[str]:
 
 
 def _console_loop() -> None:
+    _start_server_thread()
     print(_status_text())
     print("Comandos: status | revoke | clear-pin | logs | open-docs | quit")
     while True:
@@ -177,8 +187,7 @@ def _tray_loop() -> None:
         icon.stop()
         os._exit(0)
 
-    server_thread = threading.Thread(target=_run_uvicorn, daemon=True)
-    server_thread.start()
+    _start_server_thread()
 
     icon = pystray.Icon(
         "gadsign-localapi",
