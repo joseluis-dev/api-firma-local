@@ -9,19 +9,11 @@ pyhanko>=0.25.0
 asn1crypto>=1.5.0
 cryptography>=42.0.0
 qrcode>=7.4
-pillow>=10.0
+Pillow>=10.0
 
 python-pkcs11==0.8.1
 pyscard==2.3.0
 
 requests==2.32.3
 
-# Bandeja y UI nativa (Windows)
 pystray>=0.19.5
-Pillow>=10.0
-
-pytest==8.3.4
-httpx==0.28.1
-
-# Empaquetado (opcional, instalar solo en build machine)
-# pyinstaller>=6.10.0

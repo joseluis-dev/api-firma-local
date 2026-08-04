@@ -31,8 +31,17 @@ MANIFEST
 #   before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
+!installer/gadsign_localapi.spec
+installer/build/
+installer/dist/
 installer/output/
 resources/gadsign.ico
+
+# Signing secrets
+*.pfx
+*.p12
+signing/
+!signing/public.pem
 
 # Installer logs
 pip-log.txt

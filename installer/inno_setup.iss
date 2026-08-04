@@ -1,10 +1,13 @@
 ; Inno Setup script template for GadSign Local API
 ; Build with Inno Setup 6.x
-;   iscc installer/inno_setup.iss
+;   iscc /DMyAppVersion=1.0.0 installer/inno_setup.iss
+
+#ifndef MyAppVersion
+  #define MyAppVersion "1.0.0"
+#endif
 
 #define MyAppName "GadSign Local API"
 #define MyAppDisplayName "GadSign Local API"
-#define MyAppVersion "1.0.0"
 #define MyAppPublisher "GadSign / Salcedo"
 #define MyAppURL "https://www.salcedo.gob.ec/"
 #define MyAppExeName "GadSignLocalAPI.exe"
@@ -19,6 +22,12 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}
 AppUpdatesURL={#MyAppURL}
 AppCopyright={#MyAppCopyright}
+AppMutex=Local\GadSignLocalAPI
+VersionInfoVersion={#MyAppVersion}
+VersionInfoProductVersion={#MyAppVersion}
+VersionInfoCompany={#MyAppPublisher}
+VersionInfoDescription={#MyAppName} Setup
+VersionInfoCopyright={#MyAppCopyright}
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DisableProgramGroupPage=yes
 DisableDirPage=no
@@ -52,4 +61,4 @@ Name: "autostart"; Description: "Iniciar GadSign Local API al iniciar sesion"; G
 Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "Iniciar GadSign Local API"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-Type: filesandordirs; Name: "{localappdata}\GadSign\LocalAPI"
+Type: files; Name: "{app}\*.pyc"

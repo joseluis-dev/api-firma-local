@@ -24,6 +24,7 @@ import time
 import webbrowser
 from typing import Optional
 
+from .. import __version__
 from ..app import app
 from ..config import settings
 from ..core.config_store import config_store
@@ -65,7 +66,7 @@ def _status_text() -> str:
     tok_count = sum(1 for t in pairing_manager.list_tokens() if not t.revoked)
     return (
         f"GadSign Local API\n"
-        f"Version: {settings.__class__.__name__} v1.0.0\n"
+        f"Version: v{__version__}\n"
         f"Endpoint: http://{cfg.host}:{cfg.port}\n"
         f"Driver real: {'si' if real else 'no'}\n"
         f"Providers: {', '.join(p['id'] for p in providers) or '-'}\n"

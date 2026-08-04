@@ -8,6 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.types import Scope
 
+from . import __version__
 from .api.routes import router
 from .config import settings
 from .core.config_store import config_store
@@ -35,7 +36,7 @@ pairing_manager.set_approval_callback(ask_pairing_approval)
 
 app = FastAPI(
     title="localapi - Firma con Token",
-    version="1.0.0",
+    version=__version__,
     docs_url="/api/v1/docs",
     redoc_url=None,
     openapi_url="/api/v1/openapi.json",
@@ -155,7 +156,7 @@ def _is_loopback_request(request: Request) -> bool:
 def root():
     return {
         "name": "localapi",
-        "version": "1.0.0",
+        "version": __version__,
         "installationId": pairing_manager.installation_id,
         "endpoints": [
             "GET  /api/v1/health",
