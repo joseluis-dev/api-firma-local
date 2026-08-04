@@ -122,7 +122,8 @@ def _console_loop() -> None:
         elif cmd == "logs":
             print(f"Logs: {logs_dir()}")
         elif cmd == "open-docs":
-            webbrowser.open(f"http://{cfg.host}:{cfg.port}/api/v1/docs")
+            c = config_store.get()
+            webbrowser.open(f"http://{c.host}:{c.port}/api/v1/docs")
         else:
             print("Comando no reconocido.")
 
@@ -161,7 +162,8 @@ def _tray_loop() -> None:
             log.warning("No se pudo abrir ventana de estado: %s", exc)
 
     def on_open_docs(icon, item):
-        webbrowser.open(f"http://{settings.host}:{settings.port}/api/v1/docs")
+        c = config_store.get()
+        webbrowser.open(f"http://{c.host}:{c.port}/api/v1/docs")
 
     def on_open_logs(icon, item):
         try:

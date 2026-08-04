@@ -20,6 +20,7 @@ from ..errors import (
     TokenExpiredError,
     TokenRevokedError,
 )
+from .origins import build_cors_policy, origin_is_allowed
 from .pairing import PairingToken, pairing_manager
 
 
@@ -67,14 +68,19 @@ def require_host(request: Request) -> None:
         raise HostNotAllowedError(f"Host {host!r} no permitido.")
 
 
+def _cors_policy():
+    origins = list(config_store.get().effective_allowed_origins())
+    return build_cors_policy(origins)[:2]  # exact, errors
+
+
 def origin_matches_allowed(request: Request) -> bool:
-    cfg = config_store.get()
-    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    origin = request.headers.get("origin", "")
     if not origin:
-        # Misma-origen (frontend servido desde 127.0.0.1:44113) o curl local.
         return True
-    allowed = [o.strip().rstrip("/").lower() for o in cfg.effective_allowed_origins()]
-    return origin.lower() in allowed
+    exact, _errors, regex = build_cors_policy(
+        list(config_store.get().effective_allowed_origins()),
+    )
+    return origin_is_allowed(origin, exact, regex)
 
 
 def extract_bearer(request: Request) -> Optional[str]:
@@ -125,15 +131,26 @@ def require_bearer(request: Request, scope: str) -> Optional[PairingToken]:
             )
         raise AuthForbiddenError(err or "Bearer invalido.")
     if tok is not None and cfg.effective_allowed_origins():
-        origin = (request.headers.get("origin") or "").strip().rstrip("/")
-        if origin and origin.lower() != tok.origin.lower():
-            log.warning(
-                "Origin %s no coincide con token de %s",
-                origin, tok.origin,
+        origin = request.headers.get("origin", "")
+        if origin:
+            exact, _errors, regex = build_cors_policy(
+                list(cfg.effective_allowed_origins()),
             )
-            raise OriginNotAllowedError(
-                "El Origin no coincide con el token emparejado."
-            )
+            if not origin_is_allowed(origin, exact, regex):
+                log.warning("Origin %s ya no esta en la allowlist", origin)
+                raise OriginNotAllowedError(
+                    "Origen no permitido por la configuracion local."
+                )
+            normalized = origin.lower()
+            tok_normalized = tok.origin.lower()
+            if normalized != tok_normalized:
+                log.warning(
+                    "Origin %s no coincide con token de %s",
+                    origin, tok.origin,
+                )
+                raise OriginNotAllowedError(
+                    "El Origin no coincide con el token emparejado."
+                )
     return tok
 
 

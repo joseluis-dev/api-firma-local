@@ -55,19 +55,16 @@ class UserConfig:
 
     def effective_allowed_origins(self) -> List[str]:
         if self.dev_mode:
-            # En dev_mode, fusionar origines del usuario con los dev por defecto
-            # para que localhost:5173/3000 siempre esten disponibles.
             merged: List[str] = []
             seen: set = set()
             for o in list(self.allowed_origins) + list(DEFAULT_ALLOWED_ORIGINS_DEV):
                 k = o.strip().rstrip("/").lower()
                 if k and k not in seen:
                     seen.add(k)
-                    merged.append(o.strip().rstrip("/"))
+                    merged.append(o.strip())
             return merged
-        # Produccion: solo origines del usuario (filtrar dev por seguridad).
         if self.allowed_origins:
-            return [o.strip().rstrip("/") for o in self.allowed_origins if o.strip()]
+            return [o.strip() for o in self.allowed_origins if o.strip()]
         return list(DEFAULT_ALLOWED_ORIGINS_PROD)
 
 

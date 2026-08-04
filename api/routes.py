@@ -407,7 +407,7 @@ def firmar_pdf(
             provider=config_store.get().default_provider,
             tipo="TOKEN",
             pin_mode=req.pinMode or "LOCAL_PROMPT",
-            inline_pin=req.pin if req.pinMode == "INLINE" else None,
+            inline_pin=None,
             firma_params=req.firma.dict(exclude_unset=True) if req.firma else {},
             metadata_b64=req.metadataBase64,
             request_timeout_s=_rq_timeout(),

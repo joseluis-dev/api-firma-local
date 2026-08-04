@@ -20,9 +20,10 @@ from .core.security.confirmation import (
 )
 from .core.security.deps import (
     extract_bearer,
-    origin_matches_allowed,
+    origin_is_allowed as deps_origin_is_allowed,
     require_bearer,
 )
+from .core.security.origins import build_cors_policy, origin_is_allowed
 from .core.security.pairing import pairing_manager
 
 
@@ -43,14 +44,19 @@ app = FastAPI(
 )
 
 
-def _current_cors_origins() -> list:
-    return list(config_store.get().effective_allowed_origins())
+def _current_cors_policy():
+    origins = list(config_store.get().effective_allowed_origins())
+    exact, _errors, regex = build_cors_policy(origins)
+    return exact, regex
 
+
+_exact_origins, _cors_regex = _current_cors_policy()
 
 # CORS estricto: solo origenes autorizados por config_store.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_current_cors_origins(),
+    allow_origins=_exact_origins,
+    allow_origin_regex=_cors_regex,
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=[
@@ -85,10 +91,12 @@ def _attach_cors(response: JSONResponse, request: Request) -> JSONResponse:
     """
     if "access-control-allow-origin" in {k.lower() for k in response.headers.keys()}:
         return response
-    origin = (request.headers.get("origin") or "").strip().rstrip("/")
+    origin = request.headers.get("origin", "")
     if not origin:
         return response
-    if origin_matches_allowed(request):
+    origins = list(config_store.get().effective_allowed_origins())
+    exact, _errors, regex = build_cors_policy(origins)
+    if origin_is_allowed(origin, exact, regex):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
     return response

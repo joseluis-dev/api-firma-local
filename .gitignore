@@ -35,6 +35,7 @@ MANIFEST
 installer/build/
 installer/dist/
 installer/output/
+installer/version_info.txt
 resources/gadsign.ico
 
 # Signing secrets
