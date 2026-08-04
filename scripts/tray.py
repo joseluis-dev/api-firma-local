@@ -32,10 +32,13 @@ from ..core.drivers.factory import has_real_driver, list_available_providers
 from ..core.security.pairing import pairing_manager
 from ..core.token_service import _pin_cache
 from ..core.user_paths import logs_dir
-
+from ..core.update_service import UpdateService, UpdateResult
+from ..installer.update_check import CheckResult
 
 log = logging.getLogger(__name__)
 _server_thread: threading.Thread | None = None
+_shutdown_requested = False
+_update_service: UpdateService | None = None
 
 
 def _run_uvicorn() -> None:
@@ -186,8 +189,45 @@ def _tray_loop() -> None:
         ]) if tokens else pystray.MenuItem("(sin origenes)", None, enabled=False)
 
     def on_quit(icon, item):
+        global _shutdown_requested
+        _shutdown_requested = True
+        if _update_service:
+            _update_service.stop()
+        with _pin_cache._lock:
+            _pin_cache._data.clear()
         icon.stop()
-        os._exit(0)
+
+    def on_check_updates(icon, item):
+        if _update_service:
+            _update_service.check_now()
+            result = _update_service.last_result
+            if result:
+                if result.result == UpdateResult.UPDATE_AVAILABLE:
+                    _show_update_available(result)
+                elif result.result == UpdateResult.NO_UPDATE:
+                    _show_update_none()
+                else:
+                    _show_update_error(result)
+        else:
+            log.warning("UpdateService not available")
+
+    def _update_callback(result: CheckResult) -> None:
+        if result.result == UpdateResult.UPDATE_AVAILABLE:
+            _show_update_available(result)
+
+    def _show_update_available(result: CheckResult) -> None:
+        ver = result.manifest.get("version", "?") if result.manifest else "?"
+        log.info("Update available: v%s", ver)
+
+    def _show_update_none() -> None:
+        log.info("No updates available")
+
+    def _show_update_error(result: CheckResult) -> None:
+        log.warning("Update check failed: %s", result.detail)
+
+    _update_service = UpdateService()
+    _update_service.set_callbacks(on_update_available=_update_callback)
+    _update_service.start()
 
     _start_server_thread()
 
@@ -200,6 +240,8 @@ def _tray_loop() -> None:
             pystray.MenuItem("Abrir docs", on_open_docs),
             pystray.MenuItem("Abrir logs", on_open_logs),
             pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Buscar actualizaciones", on_check_updates),
+            pystray.Menu.SEPARATOR,
             pystray.MenuItem("Limpiar PIN cacheado", on_clear_pin),
             pystray.MenuItem("Revocar origen", on_revoke),
             pystray.Menu.SEPARATOR,
@@ -207,13 +249,15 @@ def _tray_loop() -> None:
         ),
     )
     icon.run()
+    return 0
 
 
 def main() -> int:
     try:
         import pystray  # type: ignore
         from PIL import Image  # type: ignore
-        _tray_loop()
+        rc = _tray_loop()
+        return rc
     except Exception as exc:
         log.info("Tray no disponible (%s), arrancando en consola.", exc)
         _console_loop()

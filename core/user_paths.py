@@ -56,3 +56,13 @@ def logs_dir() -> Path:
 
 def pidfile_path() -> Path:
     return user_data_dir() / "localapi.pid"
+
+
+def updates_dir() -> Path:
+    p = user_data_dir() / "updates"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def update_state_path() -> Path:
+    return user_data_dir() / "update_state.json"

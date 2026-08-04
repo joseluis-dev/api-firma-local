@@ -28,6 +28,8 @@ datas = [
 hiddenimports = [
     'PIL._tkinter_finder',
     'tkinter',
+    'localapi.installer.update_check',
+    'localapi.core.update_service',
 ]
 
 for package in (
