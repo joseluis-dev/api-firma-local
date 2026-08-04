@@ -2,36 +2,36 @@
 
 ## Empaquetado Windows (PyInstaller + Inno Setup)
 
-1. Instala dependencias de build en una maquina Windows:
+1. Instala dependencias de build en una maquina Windows x64:
    ```
-   pip install -r requirements.txt pyinstaller
+   py -3.13 -m venv .venv-build
+   .venv-build\Scripts\python.exe -m pip install -r requirements-build.txt
    ```
-   Tambien instala Inno Setup 6.x. En Windows puedes usar:
+   Tambien instala Inno Setup 6.x si no lo tienes:
    ```
    winget install --id JRSoftware.InnoSetup -e
    ```
 2. Genera el bundle one-folder:
    ```
-   python installer/build.py
+   .venv-build\Scripts\python.exe installer/build.py
    ```
-   Salida: `installer/dist/GadSignLocalAPI/`. El script genera
-   `resources/gadsign.ico` automaticamente si no existe.
-3. Firma el ejecutable con tu certificado de code signing:
+   Salida: `installer/dist/GadSignLocalAPI/`.
+3. Opcional — firma el ejecutable con signtool:
    ```
-   python installer/sign.py installer/dist/GadSignLocalAPI/GadSignLocalAPI.exe --pfx codigo.pfx --password *****
+   python installer/sign.py installer/dist/GadSignLocalAPI/GadSignLocalAPI.exe --thumbprint <SHA1>
    ```
+   Si no tienes certificado, omite este paso. La app funcionara sin firma
+   (Windows mostrara "Editor desconocido").
 4. Empaqueta con Inno Setup 6.x:
-   ```
-   iscc installer/inno_setup.iss
-   ```
-   Si `iscc` no esta en el `PATH`, usa:
    ```powershell
-   & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" "installer\inno_setup.iss"
+   & "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.0.1 installer\inno_setup.iss
    ```
-   Salida: `installer/output/GadSignLocalAPI-<version>-setup.exe`
-5. Firma el instalador:
+   Salida: `installer/output/GadSignLocalAPI-1.0.1-setup.exe`.
+   Para firmar tambien el instalador y desinstalador, agrega `/DSignInstaller`
+   (requiere certificado configurado).
+5. Opcional — firma el instalador:
    ```
-   python installer/sign.py installer/output/GadSignLocalAPI-1.0.0-setup.exe --pfx codigo.pfx --password *****
+   python installer/sign.py installer/output/GadSignLocalAPI-1.0.1-setup.exe --thumbprint <SHA1>
    ```
 
 ## Instalador final

@@ -1,11 +1,11 @@
 ; Inno Setup script template for GadSign Local API
 ; Build with Inno Setup 6.x
-;   iscc /DMyAppVersion=1.0.0 installer/inno_setup.iss
+;   iscc /DMyAppVersion=1.0.1 installer/inno_setup.iss
 ;
-; Code signing (configure una de las dos):
-;   iscc /DMyAppVersion=1.0.0 /Ssigntool=signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /sha1 THUMBPRINT $f installer/inno_setup.iss
-;
-;   iscc /DMyAppVersion=1.0.0 /Ssigntool=signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f cert.pfx /p %CODESIGN_PASSWORD% $f installer/inno_setup.iss
+; Para firmar digitalmente (requiere certificado de code signing):
+;   iscc /DSignInstaller /DMyAppVersion=1.0.1 installer/inno_setup.iss
+;   Esto usa el SignTool "signtool" que debe configurarse previamente
+;   (certificado en Windows Store con /sha1, o PFX con /p %CODESIGN_PASSWORD%).
 
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.0"
@@ -33,7 +33,12 @@ VersionInfoProductVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoCopyright={#MyAppCopyright}
+#ifdef SignInstaller
+SignTool=signtool
 SignedUninstaller=yes
+#else
+SignedUninstaller=no
+#endif
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DisableProgramGroupPage=yes
 DisableDirPage=no
@@ -75,28 +80,30 @@ Type: files; Name: "{app}\*.pyc"
 [Code]
 function _version_tuple(const S: String): array of Integer;
 var
-  i, p: Integer;
-  parts: TArrayOfString;
+  i, start, dot: Integer;
+  v: String;
 begin
   SetArrayLength(Result, 3);
   Result[0] := 0; Result[1] := 0; Result[2] := 0;
-  // Split raises on empty; guard it.
   if S = '' then Exit;
-  try
-    parts := SplitString(S, '.');
-  except
-    Exit;
-  end;
+  start := 1;
   for i := 0 to 2 do
   begin
-    if i < GetArrayLength(parts) then
+    dot := Pos('.', Copy(S, start, Length(S)));
+    if dot = 0 then
+      v := Copy(S, start, Length(S))
+    else
+      v := Copy(S, start, dot - 1);
+    if v <> '' then
     begin
       try
-        Result[i] := StrToInt(parts[i]);
+        Result[i] := StrToInt(v);
       except
         Result[i] := 0;
       end;
     end;
+    if dot = 0 then Break;
+    start := start + dot;
   end;
 end;
 
@@ -130,11 +137,9 @@ begin
   if installedVersion = '' then Exit;
   if _compare_versions('{#MyAppVersion}', installedVersion) < 0 then
   begin
-    SuppressibleMsgBox(
-      'Ya existe una version mas reciente (' + installedVersion +
-      '). Desinstalela antes de instalar esta version (' +
-      '{#MyAppVersion}').',
-      mbCriticalError, MB_OK, 0
+    MsgBox(
+      'Ya existe una version mas reciente (' + installedVersion + '). Desinstalela antes de instalar esta version (' + '{#MyAppVersion}' + ').',
+      mbError, MB_OK
     );
     Result := False;
     Exit;
