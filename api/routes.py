@@ -58,6 +58,20 @@ router = APIRouter(prefix="/api/v1")
 limiter = RateLimiter(max_requests=settings.rate_limit_per_minute, window_seconds=60)
 
 
+def _rq_timeout() -> int:
+    try:
+        return config_store.get().request_timeout_seconds
+    except Exception:
+        return settings.request_timeout_seconds
+
+
+def _sign_timeout() -> int:
+    try:
+        return config_store.get().sign_timeout_seconds
+    except Exception:
+        return settings.sign_timeout_seconds
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -317,11 +331,11 @@ def certificados(
     )
     try:
         return token_service.list_certificates(
-            provider=req.provider or settings.default_provider,
+            provider=req.provider or config_store.get().default_provider,
             tipo=req.tipoKeyStoreProvider or "TOKEN",
-            pin_mode=req.pinMode or settings.default_pin_mode,
+            pin_mode=req.pinMode or "LOCAL_PROMPT",
             inline_pin=None,
-            request_timeout_s=settings.request_timeout_seconds,
+            request_timeout_s=_rq_timeout(),
         )
     except LocalApiError as exc:
         log.info("RESP /certificados %s: %s", exc.status_code, exc.code.value)
@@ -390,14 +404,14 @@ def firmar_pdf(
             documento_base64=req.documentoBase64,
             documento_sha256=req.documentoSha256,
             certificado_id=req.certificadoId,
-            provider=settings.default_provider,
+            provider=config_store.get().default_provider,
             tipo="TOKEN",
-            pin_mode=req.pinMode or settings.default_pin_mode,
-            inline_pin=None,
-            firma_params=req.firma.model_dump(),
+            pin_mode=req.pinMode or "LOCAL_PROMPT",
+            inline_pin=req.pin if req.pinMode == "INLINE" else None,
+            firma_params=req.firma.dict(exclude_unset=True) if req.firma else {},
             metadata_b64=req.metadataBase64,
-            request_timeout_s=settings.request_timeout_seconds,
-            sign_timeout_s=settings.sign_timeout_seconds,
+            request_timeout_s=_rq_timeout(),
+            sign_timeout_s=_sign_timeout(),
         )
     except LocalApiError as exc:
         log.info("RESP /firmar/pdf %s: %s", exc.status_code, exc.code.value)

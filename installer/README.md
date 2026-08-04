@@ -86,15 +86,18 @@ Publicar un manifest en `https://updates.example.com/manifest.json` con:
 {
   "host": "127.0.0.1",
   "port": 44113,
-  "allowedOrigins": ["https://www.salcedo.gob.ec"],
-  "devMode": false,
-  "requirePairing": true,
-  "requireUserConfirmation": true,
-  "pinCacheTtlSeconds": 120,
-  "maxPdfMb": 25,
-  "logLevel": "INFO",
-  "signTimeoutSeconds": 120,
-  "pkcs11ModulePath": "C:\\Windows\\System32\\eTPKCS11.dll",
-  "defaultProvider": "SAFENET"
+  "allowed_origins": ["https://*.salcedo.gob.ec"],
+  "dev_mode": false,
+  "require_pairing": true,
+  "require_user_confirmation": true,
+  "pin_cache_ttl_seconds": 120,
+  "max_pdf_mb": 25,
+  "log_level": "INFO",
+  "sign_timeout_seconds": 120,
+  "request_timeout_seconds": 30,
+  "pkcs11_module_path": "C:\\Windows\\System32\\eTPKCS11.dll",
+  "default_provider": "SAFENET",
+  "mock_driver": false,
+  "pcsc_reader_index": 0
 }
 ```

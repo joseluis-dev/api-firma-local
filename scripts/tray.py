@@ -41,11 +41,12 @@ _server_thread: threading.Thread | None = None
 def _run_uvicorn() -> None:
     import uvicorn
 
+    cfg = config_store.get()
     uvicorn.run(
         app,
-        host=settings.host,
-        port=settings.port,
-        log_level=settings.log_level.lower(),
+        host=cfg.host,
+        port=cfg.port,
+        log_level=cfg.log_level.lower(),
         access_log=False,
         server_header=False,
     )
@@ -121,7 +122,7 @@ def _console_loop() -> None:
         elif cmd == "logs":
             print(f"Logs: {logs_dir()}")
         elif cmd == "open-docs":
-            webbrowser.open(f"http://{settings.host}:{settings.port}/api/v1/docs")
+            webbrowser.open(f"http://{cfg.host}:{cfg.port}/api/v1/docs")
         else:
             print("Comando no reconocido.")
 

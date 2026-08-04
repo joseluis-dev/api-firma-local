@@ -230,10 +230,26 @@ localapi/
 - [x] `GET /api/v1/health`, `POST /api/v1/certificados`,
       `POST /api/v1/firmar/pdf`.
 
-## Empaquetado sugerido
+## Empaquetado
 
-- **Windows**: autoinicio via `shell:startup` (`.bat`), instalador
-  `winget` o `msi`. Accesos directos en Start Menu y system tray
-  opcional con `pystray`.
+### Windows (PyInstaller + Inno Setup)
+
+Lee `installer/README.md` para instrucciones completas de build, firma y
+publicacion. Resumen rapido:
+
+```powershell
+pip install -r requirements-build.txt
+python installer/build.py
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" /DMyAppVersion=1.0.0 installer\inno_setup.iss
+```
+
+El instalador generado (`installer/output/GadSignLocalAPI-<version>-setup.exe`):
+- Instala en `%LOCALAPPDATA%\Programs\GadSign Local API` (sin admin).
+- Crea icono de bandeja con `pystray`.
+- Soporta actualizaciones in-place con el mismo AppId.
+- Conserva configuracion y pairing entre actualizaciones.
+
+### Linux / macOS
+
 - **Linux**: `.desktop` + `systemd --user`, paquete `.deb`/`.rpm`.
 - **macOS**: `LaunchAgent` con `LSUIElement=1`, instalador `.pkg`/`.dmg`.

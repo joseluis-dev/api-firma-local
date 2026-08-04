@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from ..config import settings
+from .config_store import config_store
 from .crypto_utils import (
     decode_base64,
     encode_base64,
@@ -88,6 +89,29 @@ class _PinCache:
 
 
 _pin_cache = _PinCache(ttl_seconds=settings.pin_cache_ttl_seconds)
+
+_pin_ttl_provider = False
+
+
+def _pin_cache_ttl() -> int:
+    try:
+        return config_store.get().pin_cache_ttl_seconds
+    except Exception:
+        return settings.pin_cache_ttl_seconds
+
+
+def _sign_timeout() -> int:
+    try:
+        return config_store.get().sign_timeout_seconds
+    except Exception:
+        return settings.sign_timeout_seconds
+
+
+def _request_timeout() -> int:
+    try:
+        return config_store.get().request_timeout_seconds
+    except Exception:
+        return settings.request_timeout_seconds
 
 
 # ---------------------------------------------------------------------------
@@ -425,7 +449,7 @@ class TokenService:
         )
 
         # 7. Capturar PIN solo justo antes de firmar.
-        sign_timeout = sign_timeout_s or settings.sign_timeout_seconds
+        sign_timeout = sign_timeout_s or _sign_timeout()
         log.info(
             "Iniciando firma PDF: provider=%s cert=%s sign_timeout=%ss",
             driver.provider_id,

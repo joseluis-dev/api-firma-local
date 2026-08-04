@@ -2,14 +2,19 @@
 
 Expone ademas el catalogo de proveedores que el frontend espera en
 ``/api/v1/health`` (EPASS3003, BIT4ID, SAFENET, UKC, PCSC).
+
+Las funciones aceptan ``driver_config`` opcional. Si es ``None``, usan
+``config_store`` en entorno empaquetado o ``settings`` como fallback.
 """
 from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import List, Optional
 
 from ...config import settings
+from ..config_store import config_store
 from ..errors import DriverNotFoundError
 from .base import TokenDriver
 from .mock_driver import MockDriver
@@ -80,6 +85,31 @@ PROVIDER_CATALOG: List[dict] = [
 ]
 
 
+class _DriverConfig:
+    """Snapshot de configuracion relevante para la fabrica de drivers."""
+
+    def __init__(self) -> None:
+        cfg = config_store.get()
+        self.mock_driver: bool = cfg.mock_driver
+        self.pkcs11_module_path: str = cfg.pkcs11_module_path
+        self.pcsc_reader_index: int = cfg.pcsc_reader_index
+
+    @staticmethod
+    def from_settings() -> "_DriverConfig":
+        c = _DriverConfig.__new__(_DriverConfig)
+        c.mock_driver = settings.mock_driver
+        c.pkcs11_module_path = settings.pkcs11_module_path
+        c.pcsc_reader_index = settings.pcsc_reader_index
+        return c
+
+
+def _driver_config() -> _DriverConfig:
+    try:
+        return _DriverConfig()
+    except Exception:
+        return _DriverConfig.from_settings()
+
+
 def _module_exists(path: str) -> bool:
     try:
         return os.path.isfile(path)
@@ -97,10 +127,11 @@ def _resolve_module(candidates: List[str], *, allow_global_fallback: bool = True
     for c in candidates:
         if _module_exists(c):
             return c
-    if allow_global_fallback and settings.pkcs11_module_path and _module_exists(
-        settings.pkcs11_module_path
+    dcfg = _driver_config()
+    if allow_global_fallback and dcfg.pkcs11_module_path and _module_exists(
+        dcfg.pkcs11_module_path
     ):
-        return settings.pkcs11_module_path
+        return dcfg.pkcs11_module_path
     return None
 
 
@@ -113,15 +144,16 @@ def _build_pkcs11_for(module_path: str) -> TokenDriver:
 
 
 def _build_pcsc() -> TokenDriver:
-    return PcscDriver(settings.pcsc_reader_index)
+    return PcscDriver(_driver_config().pcsc_reader_index)
 
 
 def _build_pkcs11() -> TokenDriver:
-    if not settings.pkcs11_module_path:
+    module_path = _driver_config().pkcs11_module_path
+    if not module_path:
         raise DriverNotFoundError(
             "PKCS11_MODULE_PATH vacio. Define la ruta al modulo del fabricante."
         )
-    return Pkcs11Driver(settings.pkcs11_module_path)
+    return Pkcs11Driver(module_path)
 
 
 def list_available_providers() -> List[dict]:
@@ -160,13 +192,13 @@ def get_driver(provider: str, tipo: str = "TOKEN") -> TokenDriver:
 
     # 1. Si el provider es MOCK y esta habilitado -> mock
     if provider == "MOCK":
-        if not settings.mock_driver:
+        if not _driver_config().mock_driver:
             raise DriverNotFoundError("Driver MOCK deshabilitado (MOCK_DRIVER=false).")
         return _build_mock()
 
     # 2. AUTO sin driver real -> mock si esta habilitado
     if provider == "AUTO":
-        if not has_real_driver() and settings.mock_driver:
+        if not has_real_driver() and _driver_config().mock_driver:
             log.info("Sin driver real; usando MOCK (desarrollo).")
             return _build_mock()
 

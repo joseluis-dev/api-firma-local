@@ -47,8 +47,11 @@ class UserConfig:
     max_pdf_mb: int = 25
     log_level: str = "INFO"
     sign_timeout_seconds: int = 120
+    request_timeout_seconds: int = 30
     pkcs11_module_path: str = r"C:\Windows\System32\eTPKCS11.dll"
     default_provider: str = "SAFENET"
+    mock_driver: bool = False
+    pcsc_reader_index: int = 0
 
     def effective_allowed_origins(self) -> List[str]:
         if self.dev_mode:

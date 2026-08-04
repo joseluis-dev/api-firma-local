@@ -111,7 +111,12 @@ async def security_headers_middleware(request: Request, call_next):
 
     # 2. Validar Host (anti-DNS-rebinding basico)
     host = request.headers.get("host", "")
-    if host and host not in {"127.0.0.1:44113", "localhost:44113", "127.0.0.1", "localhost"}:
+    port = config_store.get().port
+    allowed_hosts = {
+        f"127.0.0.1:{port}", f"localhost:{port}",
+        "127.0.0.1", "localhost",
+    }
+    if host and host not in allowed_hosts:
         log.warning("Host no permitido: %s", host)
         resp = JSONResponse(
             status_code=403,
