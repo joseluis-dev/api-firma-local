@@ -24,10 +24,10 @@ log = logging.getLogger(__name__)
 
 # Production default: devMode OFF. CORS dev origins only when devMode=true.
 DEFAULT_ALLOWED_ORIGINS_PROD: List[str] = [
-    "https://www.salcedo.gob.ec",
+    "https://*.salcedo.gob.ec",
 ]
 DEFAULT_ALLOWED_ORIGINS_DEV: List[str] = [
-    "https://www.salcedo.gob.ec",
+    "https://*.salcedo.gob.ec",
     "http://localhost:5173",
     "http://localhost:5174",
     "http://127.0.0.1:5173",
