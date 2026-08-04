@@ -1,9 +1,7 @@
-"""Script de instalacion Windows (PowerShell).
+"""Script de instalacion de DESARROLLO.
 
-Pasos:
-1. Crear entorno virtual en .venv
-2. Instalar dependencias
-3. Crear acceso directo en Startup (autostart)
+SOLO PARA ENTORNOS DE DESARROLLO.
+Para produccion, genera el instalador con PyInstaller + Inno Setup.
 """
 from __future__ import annotations
 

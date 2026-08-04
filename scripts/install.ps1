@@ -1,9 +1,12 @@
-"""Instalador rapido para Windows (PowerShell + pip)."""
-$ErrorActionPreference = "Stop"
-$root = Split-Path -Parent $PSCommandPath
-Set-Location $root
+"""Instalador de DESARROLLO para Windows (PowerShell + pip).
 
-Write-Host "== localapi install ==" -ForegroundColor Cyan
+SOLO PARA ENTORNOS DE DESARROLLO.
+Para instalacion de produccion usa el instalador Inno Setup.
+"""
+$ErrorActionPreference = "Stop"
+$root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+Set-Location $root
+Write-Host "Root: $root"
 
 # 1. Detectar Python 3.11+
 $py = $null
@@ -53,5 +56,7 @@ Set-Content -Path $bat -Value $batContent -Encoding ASCII
 Write-Host "Autostart creado: $bat" -ForegroundColor Green
 
 Write-Host "`nListo. Para iniciar ahora:" -ForegroundColor Green
-Write-Host "  .venv\Scripts\python.exe -m localapi.main"
+Write-Host "  cd $root && .venv\Scripts\python.exe -m localapi.main"
 Write-Host "Documentacion OpenAPI: http://127.0.0.1:44113/api/v1/docs"
+Write-Host "`nADVERTENCIA: Este es un instalador de DESARROLLO."
+Write-Host "  Para produccion, genera el instalador con Inno Setup."

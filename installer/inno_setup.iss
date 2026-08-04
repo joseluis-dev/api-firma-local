@@ -1,6 +1,11 @@
 ; Inno Setup script template for GadSign Local API
 ; Build with Inno Setup 6.x
 ;   iscc /DMyAppVersion=1.0.0 installer/inno_setup.iss
+;
+; Code signing (configure una de las dos):
+;   iscc /DMyAppVersion=1.0.0 /Ssigntool=signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /sha1 THUMBPRINT $f installer/inno_setup.iss
+;
+;   iscc /DMyAppVersion=1.0.0 /Ssigntool=signtool.exe sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com /f cert.pfx /p %CODESIGN_PASSWORD% $f installer/inno_setup.iss
 
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.0"
@@ -28,6 +33,7 @@ VersionInfoProductVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription={#MyAppName} Setup
 VersionInfoCopyright={#MyAppCopyright}
+SignedUninstaller=yes
 DefaultDirName={localappdata}\Programs\{#MyAppName}
 DisableProgramGroupPage=yes
 DisableDirPage=no
@@ -49,6 +55,9 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 [Files]
 Source: "..\installer\dist\GadSignLocalAPI\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
+[InstallDelete]
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Icons]
 Name: "{userdesktop}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 Name: "{userstartup}\{#MyAppDisplayName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: autostart
@@ -62,3 +71,72 @@ Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Description: "Iniciar Ga
 
 [UninstallDelete]
 Type: files; Name: "{app}\*.pyc"
+
+[Code]
+function _version_tuple(const S: String): array of Integer;
+var
+  i, p: Integer;
+  parts: TArrayOfString;
+begin
+  SetArrayLength(Result, 3);
+  Result[0] := 0; Result[1] := 0; Result[2] := 0;
+  // Split raises on empty; guard it.
+  if S = '' then Exit;
+  try
+    parts := SplitString(S, '.');
+  except
+    Exit;
+  end;
+  for i := 0 to 2 do
+  begin
+    if i < GetArrayLength(parts) then
+    begin
+      try
+        Result[i] := StrToInt(parts[i]);
+      except
+        Result[i] := 0;
+      end;
+    end;
+  end;
+end;
+
+function _compare_versions(const A, B: String): Integer;
+var
+  va, vb: array of Integer;
+  i: Integer;
+begin
+  va := _version_tuple(A);
+  vb := _version_tuple(B);
+  for i := 0 to 2 do
+  begin
+    if va[i] < vb[i] then begin Result := -1; Exit; end;
+    if va[i] > vb[i] then begin Result := 1; Exit; end;
+  end;
+  Result := 0;
+end;
+
+function InitializeSetup(): Boolean;
+var
+  installedVersion: String;
+begin
+  Result := True;
+  if not RegQueryStringValue(
+    HKCU,
+    'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#emit SetupSetting("AppId")}_is1',
+    'DisplayVersion',
+    installedVersion
+  ) then
+    Exit;
+  if installedVersion = '' then Exit;
+  if _compare_versions('{#MyAppVersion}', installedVersion) < 0 then
+  begin
+    SuppressibleMsgBox(
+      'Ya existe una version mas reciente (' + installedVersion +
+      '). Desinstalela antes de instalar esta version (' +
+      '{#MyAppVersion}').',
+      mbCriticalError, MB_OK, 0
+    );
+    Result := False;
+    Exit;
+  end;
+end;
