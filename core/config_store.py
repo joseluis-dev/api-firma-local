@@ -77,6 +77,7 @@ class ConfigStore:
     def __init__(self, path: Optional[Path] = None) -> None:
         self._path = path or config_path()
         self._lock = threading.Lock()
+        self._extra_keys: dict = {}
         self._data: UserConfig = self._load()
 
     @property
@@ -92,19 +93,28 @@ class ConfigStore:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except Exception as exc:
             log.warning("Config corrupta en %s, regenerando defaults: %s", self._path, exc)
+            backup = self._path.with_suffix(".json.bak")
+            try:
+                self._path.replace(backup)
+            except Exception:
+                pass
             cfg = UserConfig()
             self._save_unlocked(cfg)
             return cfg
-        # Merge con defaults para tolerar archivos viejos.
         defaults = asdict(UserConfig())
         defaults.update({k: v for k, v in raw.items() if k in defaults})
+        self._extra_keys = {k: v for k, v in raw.items() if k not in defaults}
         return UserConfig(**defaults)
 
     def _save_unlocked(self, cfg: UserConfig) -> None:
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
+            data = asdict(cfg)
+            for k, v in getattr(self, "_extra_keys", {}).items():
+                if k not in data:
+                    data[k] = v
             tmp = self._path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(asdict(cfg), indent=2, ensure_ascii=False), encoding="utf-8")
+            tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self._path)
         except Exception as exc:
             log.error("No se pudo guardar config: %s", exc)

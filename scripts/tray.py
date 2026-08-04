@@ -17,16 +17,13 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import sys
 import threading
-import time
 import webbrowser
 from typing import Optional
 
 from .. import __version__
 from ..app import app
-from ..config import settings
 from ..core.config_store import config_store
 from ..core.drivers.factory import has_real_driver, list_available_providers
 from ..core.security.pairing import pairing_manager
