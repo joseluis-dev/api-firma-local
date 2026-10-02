@@ -56,8 +56,9 @@ class LocalApiError(Exception):
         self.details = details or []
 
     def to_dict(self) -> Dict[str, Any]:
+        code = self.code.value if isinstance(self.code, ErrorCode) else str(self.code)
         return {
-            "code": self.code.value,
+            "code": code,
             "message": self.message,
             "details": self.details,
         }

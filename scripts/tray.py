@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import queue
 import sys
 import threading
 import webbrowser
@@ -36,6 +37,10 @@ log = logging.getLogger(__name__)
 _server_thread: threading.Thread | None = None
 _shutdown_requested = False
 _update_service: UpdateService | None = None
+
+# Acciones que los callbacks de pystray (hilo propio de pystray) envian al
+# hilo principal de Tkinter. Nunca se toca Tkinter desde otro hilo.
+_action_queue: "queue.Queue[str]" = queue.Queue()
 
 
 def _run_uvicorn() -> None:
@@ -64,7 +69,7 @@ def _status_text() -> str:
     cfg = config_store.get()
     providers = list_available_providers()
     real = has_real_driver()
-    tok_count = sum(1 for t in pairing_manager.list_tokens() if not t.revoked)
+    tok_count = len(pairing_manager.list_active_tokens())
     return (
         f"GadSign Local API\n"
         f"Version: v{__version__}\n"
@@ -135,6 +140,8 @@ def _console_loop() -> None:
 
 def _tray_loop() -> None:
     import pystray  # type: ignore
+    import tkinter as tk
+    from tkinter import scrolledtext  # noqa: F401  (valida la dependencia)
     from PIL import Image, ImageDraw  # type: ignore
 
     def make_image() -> "Image.Image":
@@ -144,34 +151,89 @@ def _tray_loop() -> None:
         d.text((18, 24), "G", fill="navy")
         return img
 
-    def on_status(icon, item):
+    # ------------------------------------------------------------------
+    # Tkinter: hilo principal (mainloop propietario de la ventana)
+    # ------------------------------------------------------------------
+
+    root = tk.Tk()
+    root.withdraw()
+    holder: dict = {"win": None}
+
+    def _refresh_status(win) -> None:
+        text = getattr(win, "_gadsign_text", None)
+        if text is None:
+            return
+        text.configure(state="normal")
+        text.delete("1.0", "end")
+        text.insert("1.0", _status_text())
+        text.configure(state="disabled")
+
+    def _show_status() -> None:
+        win = holder["win"]
+        if win is not None and win.winfo_exists():
+            win.deiconify()
+            win.lift()
+            win.focus_force()
+            _refresh_status(win)
+            return
+        win = tk.Toplevel(root)
+        holder["win"] = win
+        win.title("GadSign Local API - Estado")
+        win.geometry("520x360")
+        # Ventana de tamano fijo: el boton de maximizar queda deshabilitado.
+        win.resizable(False, False)
+        text = scrolledtext.ScrolledText(win, font=("Consolas", 10))
+        text.insert("1.0", _status_text())
+        text.configure(state="disabled")
+        text.pack(fill="both", expand=True)
+        win._gadsign_text = text  # type: ignore[attr-defined]
+        win.attributes("-topmost", True)
+        # Cerrar SOLO la ventana: la API y el icono siguen corriendo.
+        win.protocol("WM_DELETE_WINDOW", win.destroy)
+        win.bind("<Escape>", lambda _e: win.destroy())
+
+    def _quit_app() -> None:
         try:
-            import tkinter as tk
-            from tkinter import scrolledtext
+            win = holder["win"]
+            if win is not None and win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
+        root.quit()
 
-            win = tk.Tk()
-            win.title("GadSign Local API - Estado")
-            win.geometry("520x360")
-            text = scrolledtext.ScrolledText(win, font=("Consolas", 10))
-            text.insert("1.0", _status_text())
-            text.configure(state="disabled")
-            text.pack(fill="both", expand=True)
-            win.attributes("-topmost", True)
-            win.mainloop()
-        except Exception as exc:
-            log.warning("No se pudo abrir ventana de estado: %s", exc)
+    def _poll_actions() -> None:
+        try:
+            while True:
+                action = _action_queue.get_nowait()
+                if action == "status":
+                    _show_status()
+                elif action == "quit":
+                    _quit_app()
+                    return
+        except queue.Empty:
+            pass
+        except Exception:
+            log.exception("Error procesando accion del menu bandeja.")
+        root.after(100, _poll_actions)
 
-    def on_open_docs(icon, item):
+    # ------------------------------------------------------------------
+    # pystray: hilo detached; callbacks SOLO encolan acciones
+    # ------------------------------------------------------------------
+
+    def on_status(icon, item) -> None:
+        _action_queue.put("status")
+
+    def on_open_docs(icon, item) -> None:
         c = config_store.get()
         webbrowser.open(f"http://{c.host}:{c.port}/api/v1/docs")
 
-    def on_open_logs(icon, item):
+    def on_open_logs(icon, item) -> None:
         try:
             os.startfile(str(logs_dir()))  # type: ignore[attr-defined]
         except Exception:
-            print(f"Logs: {logs_dir()}")
+            log.info("Logs: %s", logs_dir())
 
-    def on_clear_pin(icon, item):
+    def on_clear_pin(icon, item) -> None:
         with _pin_cache._lock:  # type: ignore[attr-defined]
             _pin_cache._data.clear()  # type: ignore[attr-defined]
         log.info("PIN cache limpiado desde tray.")
@@ -187,7 +249,7 @@ def _tray_loop() -> None:
             for t in tokens
         ]) if tokens else pystray.MenuItem("(sin origenes)", None, enabled=False)
 
-    def on_quit(icon, item):
+    def on_quit(icon, item) -> None:
         global _shutdown_requested
         _shutdown_requested = True
         if _update_service:
@@ -195,8 +257,9 @@ def _tray_loop() -> None:
         with _pin_cache._lock:
             _pin_cache._data.clear()
         icon.stop()
+        _action_queue.put("quit")
 
-    def on_check_updates(icon, item):
+    def on_check_updates(icon, item) -> None:
         if _update_service:
             _update_service.check_now()
             result = _update_service.last_result
@@ -247,16 +310,30 @@ def _tray_loop() -> None:
             pystray.MenuItem("Salir", on_quit),
         ),
     )
-    icon.run()
+    # El icono vive en su propio hilo; Tkinter conserva el hilo principal.
+    icon.run_detached()
+
+    root.after(100, _poll_actions)
+    try:
+        root.mainloop()
+    finally:
+        # Apagado ordenado si se sale por otra via (p.ej. consola de errores).
+        _shutdown_requested = True
+        if _update_service:
+            _update_service.stop()
+        try:
+            icon.stop()
+        except Exception:
+            pass
     return 0
 
 
 def main() -> int:
     try:
-        import pystray  # type: ignore
-        from PIL import Image  # type: ignore
-        rc = _tray_loop()
-        return rc
+        import pystray  # type: ignore  # noqa: F401
+        from PIL import Image  # type: ignore  # noqa: F401
+        import tkinter  # noqa: F401
+        return _tray_loop()
     except Exception as exc:
         log.info("Tray no disponible (%s), arrancando en consola.", exc)
         _console_loop()

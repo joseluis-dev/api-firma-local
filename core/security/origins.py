@@ -25,6 +25,12 @@ _WILDCARD_REGEX = re.compile(
     rf"(?i:https://{_LABEL_RE}\.salcedo\.gob\.ec)"
 )
 
+# Loopback hosts allowed over plain HTTP (dev servers: Vite, CRA, etc.).
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+# Scheme-specific default ports; a URL on its default port omits it.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
 # ---------------------------------------------------------------------------
 # Normalization
 # ---------------------------------------------------------------------------
@@ -36,6 +42,7 @@ def normalize_origin(origin: str) -> Optional[str]:
         return None
     try:
         parsed = urlparse(origin.strip())
+        port = parsed.port  # raises ValueError on malformed/out-of-range ports
     except Exception:
         return None
     if parsed.scheme not in {"http", "https"}:
@@ -45,12 +52,16 @@ def normalize_origin(origin: str) -> Optional[str]:
         return None
     if host.count("..") or " " in host:
         return None
-    port = ""
-    if parsed.port and parsed.port not in {80, 443}:
-        port = f":{parsed.port}"
+    if port == 0:
+        return None
+    port_part = ""
+    if port is not None and port != _DEFAULT_PORTS.get(parsed.scheme):
+        port_part = f":{port}"
     if parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
         return None
-    return f"{parsed.scheme}://{host}{port}"
+    if ":" in host:  # IPv6 literal: restore brackets
+        host = f"[{host}]"
+    return f"{parsed.scheme}://{host}{port_part}"
 
 
 # ---------------------------------------------------------------------------
@@ -82,10 +93,12 @@ def build_cors_policy(
             errors.append(raw)
             log.warning("CORS: ignoring malformed origin %r", raw)
             continue
-        if normalized not in {"http://localhost", "http://127.0.0.1"} and normalized.startswith("http://"):
-            errors.append(raw)
-            log.warning("CORS: ignoring HTTP origin in production %r", raw)
-            continue
+        if normalized.startswith("http://"):
+            http_host = urlparse(normalized).hostname or ""
+            if http_host not in _LOOPBACK_HOSTS:
+                errors.append(raw)
+                log.warning("CORS: ignoring non-loopback HTTP origin %r", raw)
+                continue
         exact.append(normalized)
 
     regex_str = _WILDCARD_REGEX.pattern if seen_regex else None

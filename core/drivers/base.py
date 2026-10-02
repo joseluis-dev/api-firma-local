@@ -24,6 +24,7 @@ class SignatureRequest:
     algorithm: str
     pin: str
     key_alias: str
+    pin_ready_at: Optional[float] = None
 
 
 @dataclass

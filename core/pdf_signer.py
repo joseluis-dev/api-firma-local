@@ -7,6 +7,7 @@ visible.
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import time
@@ -24,8 +25,8 @@ class PadesParams:
     page: int = 1
     llx: float = 120.0
     lly: float = 180.0
-    width: float = 200.0
-    height: float = 70.0
+    width: float = 110.0
+    height: float = 36.0
     razon: str = "Firmado digitalmente"
     tipo_estampado: str = "QR"
     digest_algorithm: str = "SHA512"
@@ -45,6 +46,19 @@ class PadesParams:
 
 
 SignerFunc = Callable[[bytes, str], bytes]
+
+
+@dataclass
+class PreparedPdfSignature:
+    """A prepared PDF and CMS attributes; no private-key operation yet."""
+
+    signed_data: bytes
+    digest_algorithm: str
+    _finish: Callable[[bytes], bytes]
+
+    def sign(self, signer_func: SignerFunc) -> bytes:
+        signature = signer_func(self.signed_data, self.digest_algorithm)
+        return self._finish(signature)
 
 
 def _is_pdf(data: bytes) -> bool:
@@ -93,9 +107,9 @@ def _resolve_box(
     w = float(params.width)
     h = float(params.height)
     if w <= 0:
-        w = 200.0
+        w = PadesParams.width
     if h <= 0:
-        h = 70.0
+        h = PadesParams.height
 
     if params.coord_origin.upper() == "TOP_LEFT":
         pdf_w = params.pdf_width
@@ -178,25 +192,48 @@ def sign_pdf_bytes(
     params: PadesParams,
 ) -> bytes:
     """Firma el PDF. Devuelve bytes."""
+    prepared = prepare_pdf_signature(
+        pdf_bytes=pdf_bytes,
+        certificate_der=certificate_der,
+        certificate_chain_der=certificate_chain_der,
+        digest_algorithm=digest_algorithm,
+        params=params,
+    )
+    return prepared.sign(signer_func)
+
+
+def prepare_pdf_signature(
+    *,
+    pdf_bytes: bytes,
+    certificate_der: Optional[bytes],
+    certificate_chain_der: Optional[List[bytes]],
+    digest_algorithm: str,
+    params: PadesParams,
+) -> PreparedPdfSignature:
+    """Prepare the appearance, byte range and CMS attributes before PIN entry."""
     if not _is_pdf(pdf_bytes):
         raise InvalidPdfError("El documento no es un PDF valido.")
+
+    def prepare_marker() -> PreparedPdfSignature:
+        return PreparedPdfSignature(
+            _digest(pdf_bytes, digest_algorithm),
+            digest_algorithm.lower(),
+            lambda sig: _append_signature_marker(pdf_bytes, sig, digest_algorithm),
+        )
 
     if not certificate_der:
         # No hay certificado real -> no se puede hacer PAdES valido.
         # Devolvemos un trailer de firma con la firma cruda (modo desarrollo).
-        sig = signer_func(_digest(pdf_bytes, digest_algorithm), digest_algorithm.lower())
-        return _append_signature_marker(pdf_bytes, sig, digest_algorithm)
+        return prepare_marker()
 
     try:
         from pyhanko.pdf_utils.incremental_writer import IncrementalPdfFileWriter
-        from pyhanko.sign import sign_pdf
         from pyhanko.sign.signers.pdf_signer import PdfSignatureMetadata, PdfSigner
-        from pyhanko.sign.signers.pdf_cms import Signer
+        from pyhanko.sign.signers.pdf_cms import ExternalSigner
         from pyhanko.sign.fields import SigFieldSpec
     except Exception as exc:  # pragma: no cover
         log.warning("pyhanko no disponible, fallback: %s", exc)
-        sig = signer_func(_digest(pdf_bytes, digest_algorithm), digest_algorithm.lower())
-        return _append_signature_marker(pdf_bytes, sig, digest_algorithm)
+        return prepare_marker()
 
     try:
         from cryptography import x509 as c_x509
@@ -230,7 +267,12 @@ def sign_pdf_bytes(
 
     page_0based, box = _resolve_box(params)
     field_name = f"LocalAPI-Sig-{int(time.time() * 1000)}"
+    started = time.perf_counter()
     stamp_style = _build_stamp_style(params)
+    log.info(
+        "Signing timing: stage=stamp_render elapsed_ms=%.1f",
+        (time.perf_counter() - started) * 1000,
+    )
 
     log.info(
         "Firma visible: campo=%s page=%d box=%s estilo=%s signer=%s",
@@ -256,32 +298,21 @@ def sign_pdf_bytes(
         md_algorithm=md_algorithm,
     )
 
-    # Construimos un Signer con callback
+    # Reserve space using the real RSA modulus size, without touching the key.
     try:
         from asn1crypto import x509 as a1_x509
 
         cert_a1 = a1_x509.Certificate.load(certificate_der)
 
-        class _CallbackSigner(Signer):
-            def __init__(self, cert_a1_, callback):
-                super().__init__(signing_cert=cert_a1_)
-                self._cb = callback
-
-            async def async_sign_raw(
-                self,
-                signed_attrs: bytes,
-                digest_algorithm: str,
-                dry_run: bool = False,
-            ) -> bytes:
-                if dry_run:
-                    return b"\x00" * 256
-                return self._cb(signed_attrs, digest_algorithm)
-
-        signer_obj = _CallbackSigner(cert_a1, signer_func)
+        signature_size = (cert_crypto.public_key().key_size + 7) // 8
+        signer_obj = ExternalSigner(
+            signing_cert=cert_a1,
+            cert_registry=None,
+            signature_value=signature_size,
+        )
     except Exception as exc:
         log.warning("No se pudo construir Signer de pyhanko, fallback a trailer: %s", exc)
-        sig = signer_func(_digest(pdf_bytes, digest_algorithm), digest_algorithm.lower())
-        return _append_signature_marker(pdf_bytes, sig, digest_algorithm)
+        return prepare_marker()
 
     try:
         pdf_signer = PdfSigner(
@@ -290,10 +321,21 @@ def sign_pdf_bytes(
             stamp_style=stamp_style,
             new_field_spec=new_field_spec,
         )
-        out = pdf_signer.sign_pdf(
-            writer,
-            existing_fields_only=False,
-            output=io.BytesIO(),
+
+        async def prepare():
+            digest, tbs, output = await pdf_signer.async_digest_doc_for_signing(
+                writer, existing_fields_only=False, output=io.BytesIO()
+            )
+            attrs = await signer_obj.signed_attrs(
+                digest.document_digest, md_algorithm, use_pades=tbs.use_pades
+            )
+            return digest, tbs, output, attrs
+
+        started = time.perf_counter()
+        prepared_digest, tbs_document, output, signed_attrs = asyncio.run(prepare())
+        log.info(
+            "Signing timing: stage=pdf_digest elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
         )
     except Exception as exc:
         log.exception("PAdES fallo: %s", exc)
@@ -301,15 +343,37 @@ def sign_pdf_bytes(
             f"No se pudo crear la firma PAdES visible: {exc}"
         ) from exc
 
-    if isinstance(out, (bytes, bytearray)):
-        return bytes(out)
-    if hasattr(out, "getvalue"):
-        return out.getvalue()
-    if hasattr(out, "write"):
-        buf = io.BytesIO()
-        out.write(buf)
-        return buf.getvalue()
-    raise SignatureRejectedError("La firma PAdES no produjo salida valida.")
+    def finish(signature: bytes) -> bytes:
+        from pyhanko.sign.signers.pdf_signer import PdfTBSDocument
+
+        async def embed():
+            external_signer = ExternalSigner(
+                signing_cert=cert_a1, cert_registry=None, signature_value=signature
+            )
+            cms = await external_signer.async_sign_prescribed_attributes(
+                md_algorithm, signed_attrs=signed_attrs
+            )
+            await PdfTBSDocument.async_finish_signing(
+                output,
+                prepared_digest=prepared_digest,
+                signature_cms=cms,
+                post_sign_instr=tbs_document.post_sign_instructions,
+            )
+
+        try:
+            started = time.perf_counter()
+            asyncio.run(embed())
+            log.info(
+                "Signing timing: stage=cms_embed elapsed_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
+            return output.getvalue()
+        except Exception as exc:
+            raise SignatureRejectedError(
+                f"No se pudo completar la firma PAdES: {exc}"
+            ) from exc
+
+    return PreparedPdfSignature(signed_attrs.dump(), md_algorithm, finish)
 
 
 def _digest(data: bytes, algo: str) -> bytes:

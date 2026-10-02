@@ -4,9 +4,9 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.types import Scope
+from starlette.middleware.cors import CORSMiddleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import __version__
 from .api.routes import router
@@ -44,32 +44,56 @@ app = FastAPI(
 )
 
 
-def _current_cors_policy():
-    origins = list(config_store.get().effective_allowed_origins())
+def _current_cors_policy_from(origins: list):
     exact, _errors, regex = build_cors_policy(origins)
     return exact, regex
 
 
-_exact_origins, _cors_regex = _current_cors_policy()
+class _DynamicCorsMiddleware:
+    """CORSMiddleware con politica leida de config_store en caliente.
 
-# CORS estricto: solo origenes autorizados por config_store.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_exact_origins,
-    allow_origin_regex=_cors_regex,
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=[
-        "Content-Type",
-        "Authorization",
-        "X-LocalAPI-Request-Id",
-        "X-LocalAPI-Timestamp",
-    ],
-    expose_headers=[
-        "X-LocalAPI-Request-Id",
-    ],
-    max_age=600,
-)
+    CORSMiddleware congela su allowlist en ``__init__``; si el usuario
+    edita config.json sin reiniciar, el preflight seguiria rechazando
+    los orígenes nuevos. Esta capa reconstruye el middleware solo cuando
+    la lista de orígenes efectiva cambia.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self._app = app
+        self._policy_key: tuple | None = None
+        self._wrapped: CORSMiddleware | None = None
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self._app(scope, receive, send)
+            return
+        key = tuple(config_store.get().effective_allowed_origins())
+        if self._wrapped is None or key != self._policy_key:
+            exact, regex = _current_cors_policy_from(list(key))
+            self._wrapped = CORSMiddleware(
+                self._app,
+                allow_origins=exact,
+                allow_origin_regex=regex,
+                allow_credentials=False,
+                allow_methods=["GET", "POST", "OPTIONS"],
+                allow_headers=[
+                    "Content-Type",
+                    "Authorization",
+                    "X-LocalAPI-Request-Id",
+                    "X-LocalAPI-Timestamp",
+                ],
+                expose_headers=[
+                    "X-LocalAPI-Request-Id",
+                ],
+                max_age=600,
+            )
+            self._policy_key = key
+        await self._wrapped(scope, receive, send)
+
+
+# CORS estricto: solo origenes autorizados por config_store, reevaluados
+# en caliente (ver _DynamicCorsMiddleware).
+app.add_middleware(_DynamicCorsMiddleware)
 
 
 # Cabeceras de seguridad minimas
@@ -95,7 +119,7 @@ def _attach_cors(response: JSONResponse, request: Request) -> JSONResponse:
     if not origin:
         return response
     origins = list(config_store.get().effective_allowed_origins())
-    exact, _errors, regex = build_cors_policy(origins)
+    exact, regex = _current_cors_policy_from(origins)
     if origin_is_allowed(origin, exact, regex):
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"

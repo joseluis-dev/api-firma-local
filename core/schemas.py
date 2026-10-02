@@ -74,8 +74,8 @@ class FirmaParametros(BaseModel):
     razon: str = "Firmado digitalmente"
     llx: Num = "120"
     lly: Num = "180"
-    ancho: Num = "200"
-    alto: Num = "70"
+    ancho: Num = "110"
+    alto: Num = "36"
     # Origen de coordenadas: PDF_BOTTOM_LEFT (por defecto) o TOP_LEFT
     # (util si el frontend envia coordenadas en pixeles del visor).
     coordOrigin: str = "PDF_BOTTOM_LEFT"
@@ -108,7 +108,8 @@ class FirmaParametros(BaseModel):
 
     # Bloques nuevos que el frontend envia con metadata completa de
     # ubicacion. Si ``rectangulo`` esta presente, define la posicion
-    # exacta en puntos PDF y se ignora todo lo demas.
+    # en puntos PDF y se ignora todo lo demas. El sello FirmaEC conserva
+    # el centro de este rectangulo y usa un tamano de 110 x 36 puntos.
     ubicacion: Optional["FirmaUbicacion"] = None
     rectangulo: Optional["FirmaRectangulo"] = None
 

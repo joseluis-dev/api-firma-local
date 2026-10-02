@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from .. import __version__
 from ..config import settings
 from ..core.config_store import config_store
-from ..core.errors import LocalApiError
+from ..core.errors import ErrorCode, LocalApiError
 from ..core.errors import (
     AuthRequiredError,
     OriginNotAllowedError,
@@ -99,7 +99,7 @@ def _check_rate(request: Request, endpoint: str) -> None:
     if not limiter.hit(_client_key(request), endpoint):
         raise LocalApiError(
             "Demasiadas solicitudes; intente mas tarde.",
-            code="INVALID_INPUT",  # usamos INVALID_INPUT como 429
+            code=ErrorCode.INVALID_INPUT,  # usamos INVALID_INPUT como 429
             status_code=429,
         )
 
@@ -305,8 +305,7 @@ def pairing_status(request: Request):
                 "expiresAt": t.expires_at,
                 "revoked": t.revoked,
             }
-            for t in pairing_manager.list_tokens()
-            if not t.revoked
+            for t in pairing_manager.list_active_tokens()
         ],
     }
 
@@ -338,7 +337,7 @@ def certificados(
             request_timeout_s=_rq_timeout(),
         )
     except LocalApiError as exc:
-        log.info("RESP /certificados %s: %s", exc.status_code, exc.code.value)
+        log.info("RESP /certificados %s: %s", exc.status_code, getattr(exc.code, "value", exc.code))
         return _error_response(exc)
     except Exception as exc:
         return _internal_error_response(exc)
@@ -387,7 +386,7 @@ def firmar_pdf(
                 return _error_response(
                     LocalApiError(
                         "El usuario cancelo la solicitud de firma.",
-                        code="USER_CANCELLED",
+                        code=ErrorCode.USER_CANCELLED,
                         status_code=400,
                     )
                 )
@@ -414,7 +413,7 @@ def firmar_pdf(
             sign_timeout_s=_sign_timeout(),
         )
     except LocalApiError as exc:
-        log.info("RESP /firmar/pdf %s: %s", exc.status_code, exc.code.value)
+        log.info("RESP /firmar/pdf %s: %s", exc.status_code, getattr(exc.code, "value", exc.code))
         return _error_response(exc)
     except Exception as exc:
         return _internal_error_response(exc)

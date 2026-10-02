@@ -387,6 +387,15 @@ class PairingManager:
             self._gc_locked()
             return list(self._data.tokens)
 
+    def list_active_tokens(self) -> List[PairingToken]:
+        """Tokens vigentes: no revocados y dentro de issued_at/expires_at."""
+        now = _now_ts()
+        return [
+            token
+            for token in self.list_tokens()
+            if not token.revoked and token.issued_at <= now < token.expires_at
+        ]
+
     # ------------------------------------------------------------------
     # Validacion de tokens
     # ------------------------------------------------------------------
@@ -425,7 +434,7 @@ class PairingManager:
         iat = int(payload.get("iat", 0))
         exp = int(payload.get("exp", 0))
         now = _now_ts()
-        if now < iat or now > exp:
+        if not iat <= now < exp:
             return False, "Token expirado.", None, "expired"
         scopes = payload.get("scopes") or []
         if required_scope and required_scope not in scopes:

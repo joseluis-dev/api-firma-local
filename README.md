@@ -136,6 +136,50 @@ Ejemplo de `request.json`:
 }
 ```
 
+El estampado mide **110 x 36 puntos PDF** (38.8 x 12.7 mm), como el
+ejemplo de FirmaEC. Si el cliente envia `firma.rectangulo` o dimensiones
+de seleccion, se conserva su centro y se aplica ese tamano al sello.
+
+La API lee el certificado publico y prepara el PDF **antes de pedir el
+PIN**. Despues se autentica una sola vez para localizar la clave y firmar.
+`request_timeout_seconds` limita la preparacion y la captura del PIN por
+separado; `sign_timeout_seconds` empieza despues de capturar el PIN.
+
+Para diagnosticar demoras, buscar `Signing timing` en el log. Cada registro
+incluye `stage` y `elapsed_ms`. `pin_ready_to_token_sign` mide el intervalo
+desde que la API recibe el PIN hasta llamar al token; `token_sign` incluye
+la espera de Touch Sense. `token_login` y `key_lookup` permiten localizar
+demoras del controlador. Los registros no incluyen el PIN.
+
+#### Compatibilidad con el frontend
+
+La optimizacion de firma conserva endpoints, encabezados, campos JSON y
+codigos de error. El frontend puede seguir enviando el mismo payload y
+esperando la respuesta de `POST /api/v1/firmar/pdf`; no necesita nuevas
+peticiones ni eventos para el PIN o Touch Sense.
+
+El cambio visible es el sello de **110 x 36 puntos**, centrado en la
+seleccion enviada. Si el visor dibuja una previsualizacion del sello, puede
+ajustarla a esas dimensiones para que coincida con el PDF final. En un
+visor con escala `s` pixeles por punto, la previsualizacion mide
+`110 * s` por `36 * s` pixeles. Este ajuste visual es opcional para firmar.
+
+#### Autorizacion local y expiracion
+
+El Bearer de emparejamiento autoriza al navegador durante ocho horas. Al
+vencer, la API devuelve HTTP `401` con `code=TOKEN_EXPIRED` antes de leer
+certificados o solicitar el PIN. La aprobacion de emparejamiento y el PIN
+del dispositivo son pasos independientes.
+
+El cliente conserva `expiresAt` en segundos Unix junto al Bearer. Si vence,
+solicita nuevamente `/api/v1/pairing/request`, comparte el emparejamiento
+entre llamadas concurrentes y reintenta la operacion como maximo una vez
+tras aprobarla. La cancelacion debe detener el reintento.
+
+`GET /api/v1/pairing/status` y el contador de la bandeja consideran activos
+solo los tokens no revocados con `issuedAt <= ahora < expiresAt`. Los
+registros anteriores se conservan para auditoria y revocacion.
+
 ## Errores
 
 Todas las respuestas de error siguen:

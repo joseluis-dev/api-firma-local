@@ -28,7 +28,7 @@ from .errors import (
     TokenLockedError,
     UserCancelledError,
 )
-from .pdf_signer import PadesParams, sign_pdf_bytes
+from .pdf_signer import PadesParams, PreparedPdfSignature, prepare_pdf_signature
 from .pin_dialog import ask_pin
 from .schemas import (
     CertificateInfo,
@@ -420,7 +420,7 @@ class TokenService:
         # 6. Preparar placement
         signer_name = _resolve_signer_name(cached)
         placement = _resolve_placement(firma_params)
-        placement["box"] = _scale_box_centered(placement["box"], 0.90)
+        placement["box"] = _firmaec_box_centered(placement["box"])
         log.info(
             "placement source=%s page=%d box=%s signer=%s",
             placement.get("source"),
@@ -448,7 +448,7 @@ class TokenService:
             issuer=str(cached.get("issuer", "")),
         )
 
-        # 7. Capturar PIN solo justo antes de firmar.
+        # Prepare all public data before asking for the PIN.
         sign_timeout = sign_timeout_s or _sign_timeout()
         log.info(
             "Iniciando firma PDF: provider=%s cert=%s sign_timeout=%ss",
@@ -457,7 +457,20 @@ class TokenService:
             sign_timeout,
         )
 
+        prepared = None
+        if driver.provider_id != "MOCK":
+            started = time.perf_counter()
+            prepared = _run_with_timeout(
+                lambda: self._prepare_pades(driver, pdf_bytes, pades_params, certificado_id),
+                request_timeout_s,
+            )
+            log.info(
+                "Signing timing: stage=pdf_prepare elapsed_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
+
         pin: Optional[str] = None
+        started = time.perf_counter()
         if pin_mode in {"LOCAL_PROMPT", "INLINE"}:
             try:
                 pin = _run_with_timeout(
@@ -470,12 +483,17 @@ class TokenService:
                 self._invalidate_pin_on_error(exc, cache_key)
                 raise
 
+        pin_ready_at = time.perf_counter()
+        log.info(
+            "Signing timing: stage=pin_capture elapsed_ms=%.1f",
+            (pin_ready_at - started) * 1000,
+        )
         try:
             if driver.provider_id == "MOCK":
                 signed = self._sign_with_driver(driver, pdf_bytes, pades_params, pin, certificado_id)
             else:
                 signed = self._run_sign_with_timeout(
-                    driver, pdf_bytes, pades_params, pin, certificado_id, sign_timeout
+                    driver, prepared, pin, certificado_id, sign_timeout, pin_ready_at
                 )
         except LocalApiError as exc:
             self._invalidate_pin_on_error(exc, cache_key)
@@ -526,45 +544,32 @@ class TokenService:
         )
         return pdf_bytes + trailer
 
-    def _sign_pades(
+    def _prepare_pades(
         self,
         driver: TokenDriver,
         pdf_bytes: bytes,
         params: PadesParams,
-        pin: Optional[str],
         cert_id: str,
-    ) -> bytes:
-        """Firma PAdES real usando el driver para obtener cert + signature."""
-
-        def sign_func(data: bytes, md_algo: str) -> bytes:
-            algo_name = {
-                "sha256": "SHA256",
-                "sha384": "SHA384",
-                "sha512": "SHA512",
-            }.get(md_algo.lower(), "SHA512")
-            return driver.sign(
-                SignatureRequest(
-                    data=data,
-                    algorithm=algo_name,
-                    pin=pin or "",
-                    key_alias=cert_id,
-                )
-            ).signature
-
+    ) -> PreparedPdfSignature:
+        """Read the public certificate and prepare the PDF without a login."""
         # Necesitamos el cert_der del alias.
-        cert_der = self._get_cert_der(driver, cert_id, pin)
+        started = time.perf_counter()
+        cert_der = self._get_cert_der(driver, cert_id, None)
+        log.info(
+            "Signing timing: stage=certificate_read elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+        )
         if not cert_der:
             raise CertificateNotFoundError(
                 f"No se pudo obtener el certificado DER para alias={cert_id!r}. "
                 "El driver no expuso get_certificate_der."
             )
 
-        return sign_pdf_bytes(
+        return prepare_pdf_signature(
             pdf_bytes=pdf_bytes,
             certificate_der=cert_der,
             certificate_chain_der=[cert_der],
             digest_algorithm=params.digest_algorithm,
-            signer_func=sign_func,
             params=params,
         )
 
@@ -583,20 +588,29 @@ class TokenService:
     def _run_sign_with_timeout(
         self,
         driver: TokenDriver,
-        pdf_bytes: bytes,
-        params: PadesParams,
+        prepared: PreparedPdfSignature,
         pin: Optional[str],
         cert_id: str,
         timeout_s: int,
+        pin_ready_at: float,
     ) -> bytes:
         """Firma con timeout duro para soportar Touch Sense del token."""
         box: dict = {}
 
+        def sign_func(data: bytes, md_algo: str) -> bytes:
+            return driver.sign(
+                SignatureRequest(
+                    data=data,
+                    algorithm=md_algo.upper(),
+                    pin=pin or "",
+                    key_alias=cert_id,
+                    pin_ready_at=pin_ready_at,
+                )
+            ).signature
+
         def worker() -> None:
             try:
-                box["value"] = self._sign_pades(
-                    driver, pdf_bytes, params, pin, cert_id
-                )
+                box["value"] = prepared.sign(sign_func)
             except Exception as exc:
                 box["error"] = exc
 
@@ -676,7 +690,7 @@ def _resolve_placement(firma_params: dict) -> dict:
 
     Devuelve ``{"source": str, "page": int, "box": (x1,y1,x2,y2)}``
     con origen bottom-left (sistema PDF). El box es el rectangulo de
-    la firma visible.
+    la seleccion; el sello usa su centro con un tamano fijo de 110 x 36.
 
     Prioridad:
     1. ``firma.rectangulo``  (fuente de verdad para el flujo token)
@@ -724,12 +738,12 @@ def _resolve_placement(firma_params: dict) -> dict:
         if "BOTTOM" in origin or "PDF" in cs:
             x = _as_float(ubi.get("x")) or 0.0
             y = _as_float(ubi.get("y")) or 0.0
-            w = _as_float(ubi.get("width")) or 200.0
-            h = _as_float(ubi.get("height")) or 70.0
+            w = _as_float(ubi.get("width")) or PadesParams.width
+            h = _as_float(ubi.get("height")) or PadesParams.height
             if w <= 0:
-                w = 170.0
+                w = PadesParams.width
             if h <= 0:
-                h = 64.0
+                h = PadesParams.height
             return {
                 "source": "ubicacion_bottom_left",
                 "page": page,
@@ -744,13 +758,13 @@ def _resolve_placement(firma_params: dict) -> dict:
         if "TOP" in origin:
             x = _as_float(ubi.get("x")) or 0.0
             y = _as_float(ubi.get("y")) or 0.0
-            w = _as_float(ubi.get("width")) or 200.0
-            h = _as_float(ubi.get("height")) or 70.0
+            w = _as_float(ubi.get("width")) or PadesParams.width
+            h = _as_float(ubi.get("height")) or PadesParams.height
             ph = _as_float(ubi.get("pageHeight")) or _as_float(firma_params.get("pageHeight")) or 842.0
             if w <= 0:
-                w = 170.0
+                w = PadesParams.width
             if h <= 0:
-                h = 64.0
+                h = PadesParams.height
             return {
                 "source": "ubicacion_top_left",
                 "page": page,
@@ -771,13 +785,13 @@ def _resolve_placement(firma_params: dict) -> dict:
             or _as_int(firma_params.get("pagina"))
             or 1
         )
-        w = _as_float(firma_params.get("width")) or 200.0
-        h = _as_float(firma_params.get("height")) or 70.0
+        w = _as_float(firma_params.get("width")) or PadesParams.width
+        h = _as_float(firma_params.get("height")) or PadesParams.height
         ph = _as_float(firma_params.get("pageHeight")) or 842.0
         if w <= 0:
-            w = 170.0
+            w = PadesParams.width
         if h <= 0:
-            h = 70.0
+            h = PadesParams.height
         return {
             "source": "top_level_xy",
             "page": page,
@@ -797,12 +811,12 @@ def _resolve_placement(firma_params: dict) -> dict:
     )
     lx = _as_float(firma_params.get("llx")) or 120.0
     ly = _as_float(firma_params.get("lly")) or 180.0
-    w = _as_float(firma_params.get("width")) or _as_float(firma_params.get("ancho")) or 200.0
-    h = _as_float(firma_params.get("height")) or _as_float(firma_params.get("alto")) or 70.0
+    w = _as_float(firma_params.get("width")) or _as_float(firma_params.get("ancho")) or PadesParams.width
+    h = _as_float(firma_params.get("height")) or _as_float(firma_params.get("alto")) or PadesParams.height
     if w <= 0:
-        w = 170.0
+        w = PadesParams.width
     if h <= 0:
-        h = 64.0
+        h = PadesParams.height
     return {
         "source": "legacy_llx_lly",
         "page": page,
@@ -815,24 +829,18 @@ def _resolve_placement(firma_params: dict) -> dict:
     }
 
 
-def _scale_box_centered(box, factor: float):
-    """Escala el rectangulo manteniendo el mismo centro.
-
-    Sirve para reducir (o aumentar) el tamano del campo de firma
-    sin cambiar la posicion visual.
-    """
-    if factor == 1.0:
-        return box
+def _firmaec_box_centered(box):
+    """Use FirmaEC's physical size regardless of viewer zoom or selection size."""
     x1, y1, x2, y2 = box
+    if x2 <= x1 or y2 <= y1:
+        raise InvalidInputError("El rectangulo de firma debe tener ancho y alto positivos.")
     cx = (x1 + x2) / 2
     cy = (y1 + y2) / 2
-    w = (x2 - x1) * factor
-    h = (y2 - y1) * factor
     return (
-        int(round(cx - w / 2)),
-        int(round(cy - h / 2)),
-        int(round(cx + w / 2)),
-        int(round(cy + h / 2)),
+        cx - PadesParams.width / 2,
+        cy - PadesParams.height / 2,
+        cx + PadesParams.width / 2,
+        cy + PadesParams.height / 2,
     )
 
 

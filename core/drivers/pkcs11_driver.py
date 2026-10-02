@@ -6,14 +6,17 @@ ePass3003, Bit4Id, Safenet, UKC, etc.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, List, Optional
 
 from ..errors import (
     CertificateNotFoundError,
     DriverNotFoundError,
     PinInvalidError,
+    TimeoutError_,
     TokenLockedError,
     TokenNotFoundError,
+    UserCancelledError,
 )
 from ..schemas import CertificateInfo
 from .base import SignatureRequest, SignatureResult, TokenDriver, certificate_info_from_x509
@@ -61,10 +64,10 @@ def _label_of(obj: Any, constants: Any) -> str:
         return ""
     if isinstance(val, bytes):
         try:
-            return val.decode("utf-8", errors="ignore").rstrip("\x00").strip()
+            return val.decode("utf-8", errors="ignore").strip("\x00 \t\r\n")
         except Exception:
             return ""
-    return str(val).rstrip("\x00").strip()
+    return str(val).strip("\x00 \t\r\n")
 
 
 def _id_of(obj: Any, constants: Any) -> str:
@@ -96,6 +99,7 @@ class Pkcs11Driver(TokenDriver):
             return False
 
     def _open_session(self, pin: Optional[str] = None):
+        started = time.perf_counter()
         pkcs11, _ = _import_pkcs11()
         try:
             lib = pkcs11.lib(self._module_path)
@@ -112,10 +116,22 @@ class Pkcs11Driver(TokenDriver):
             raise TokenNotFoundError("No hay tokens PKCS#11 insertados.")
 
         token = tokens[0]
+        log.info(
+            "Signing timing: stage=token_select elapsed_ms=%.1f",
+            (time.perf_counter() - started) * 1000,
+        )
+        started = time.perf_counter()
         try:
             if pin:
-                return token.open(user_pin=pin)
-            return token.open()
+                session = token.open(user_pin=pin)
+            else:
+                session = token.open()
+            log.info(
+                "Signing timing: stage=%s elapsed_ms=%.1f",
+                "token_login" if pin else "public_session",
+                (time.perf_counter() - started) * 1000,
+            )
+            return session
         except Exception as exc:
             self._map_session_error(exc)
             raise  # type: ignore[misc]
@@ -308,8 +324,8 @@ class Pkcs11Driver(TokenDriver):
             raise CertificateNotFoundError(f"Algoritmo {alg} no soportado.")
         mechanism = getattr(constants.Mechanism, mech_name)
 
-        token_label = self.get_token_label()
         with self._open_session(request.pin) as session:
+            started = time.perf_counter()
             private_key, cert_obj = self._find_key_and_cert(
                 session, constants, request.key_alias
             )
@@ -317,6 +333,10 @@ class Pkcs11Driver(TokenDriver):
                 bytes(_attr(cert_obj, constants.Attribute.VALUE, b""))
                 if cert_obj
                 else b""
+            )
+            log.info(
+                "Signing timing: stage=key_lookup elapsed_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
             )
 
             from ...config import settings as _settings
@@ -329,10 +349,20 @@ class Pkcs11Driver(TokenDriver):
                     _settings.sign_timeout_seconds,
                 )
 
+            if request.pin_ready_at is not None:
+                log.info(
+                    "Signing timing: stage=pin_ready_to_token_sign elapsed_ms=%.1f",
+                    (time.perf_counter() - request.pin_ready_at) * 1000,
+                )
+            started = time.perf_counter()
             try:
                 signature = private_key.sign(request.data, mechanism=mechanism)
             except Exception as exc:
                 self._map_sign_error(exc)
+            log.info(
+                "Signing timing: stage=token_sign elapsed_ms=%.1f",
+                (time.perf_counter() - started) * 1000,
+            )
 
             log.info(
                 "Firma autorizada por token (alias=%s, alg=%s)",
@@ -377,57 +407,68 @@ class Pkcs11Driver(TokenDriver):
         """Devuelve el certificado en formato DER sin listar todos."""
         pkcs11, constants = _import_pkcs11()
         with self._open_session(pin) as session:
-            for c in session.get_objects(
-                {constants.Attribute.CLASS: constants.ObjectClass.CERTIFICATE}
-            ):
-                label = _label_of(c, constants) or _id_of(c, constants)
-                cid = _id_of(c, constants)
-                if label == cert_id or (cid and cid == cert_id):
-                    return bytes(_attr(c, constants.Attribute.VALUE, b""))
-        raise CertificateNotFoundError(
-            f"Certificado {cert_id!r} no encontrado en el token."
-        )
+            cert = self._find_certificate(session, constants, cert_id)
+            return bytes(_attr(cert, constants.Attribute.VALUE, b""))
+
+    def _find_certificate(self, session, constants, alias: str):
+        cert_class = {constants.Attribute.CLASS: constants.ObjectClass.CERTIFICATE}
+        # Consume each search completely before starting another PKCS#11 search.
+        matches = list(session.get_objects({
+            **cert_class, constants.Attribute.LABEL: alias,
+        }))
+        if not matches:
+            try:
+                cert_id = bytes.fromhex(alias)
+            except ValueError:
+                cert_id = b""
+            if cert_id:
+                matches = list(session.get_objects({
+                    **cert_class, constants.Attribute.ID: cert_id,
+                }))
+        if matches:
+            return matches[0]
+        # Preserve aliases with padded/normalised labels on older tokens.
+        for cert in list(session.get_objects(cert_class)):
+            label = _label_of(cert, constants) or _id_of(cert, constants)
+            if label == alias or _id_of(cert, constants) == alias:
+                return cert
+        raise CertificateNotFoundError(f"Certificado {alias!r} no existe en el token.")
 
     def _find_key_and_cert(self, session, constants, alias: str):
         private_key = None
-        cert_obj = None
         # 1. Localizar el cert seleccionado por label o por CKA_ID
-        for c in session.get_objects(
-            {constants.Attribute.CLASS: constants.ObjectClass.CERTIFICATE}
-        ):
-            label = _label_of(c, constants) or _id_of(c, constants)
-            cid = _id_of(c, constants)
-            if label == alias or (cid and cid == alias):
-                cert_obj = c
-                break
-
-        if cert_obj is None:
-            raise CertificateNotFoundError(
-                f"Certificado {alias!r} no existe en el token."
-            )
+        cert_obj = self._find_certificate(session, constants, alias)
 
         # 2. Buscar clave privada por CKA_ID del cert (no por label)
         cert_id_hex = _id_of(cert_obj, constants)
         if cert_id_hex:
-            for key in session.get_objects(
-                {constants.Attribute.CLASS: constants.ObjectClass.PRIVATE_KEY}
-            ):
-                if _id_of(key, constants) == cert_id_hex:
-                    private_key = key
-                    break
+            keys = list(session.get_objects({
+                constants.Attribute.CLASS: constants.ObjectClass.PRIVATE_KEY,
+                constants.Attribute.ID: bytes.fromhex(cert_id_hex),
+            }))
+            if keys:
+                private_key = keys[0]
 
         # 3. Fallback: buscar por label si no se encontro por ID
         if private_key is None:
             cert_label = (
                 _label_of(cert_obj, constants) or _id_of(cert_obj, constants)
             )
-            for key in session.get_objects(
-                {constants.Attribute.CLASS: constants.ObjectClass.PRIVATE_KEY}
-            ):
-                label = _label_of(key, constants) or _id_of(key, constants)
-                if label == cert_label:
-                    private_key = key
-                    break
+            keys = list(session.get_objects({
+                constants.Attribute.CLASS: constants.ObjectClass.PRIVATE_KEY,
+                constants.Attribute.LABEL: cert_label,
+            }))
+            if keys:
+                private_key = keys[0]
+            if private_key is None:
+                # Older modules may store padded labels that do not match a template.
+                for key in list(session.get_objects({
+                    constants.Attribute.CLASS: constants.ObjectClass.PRIVATE_KEY,
+                })):
+                    label = _label_of(key, constants) or _id_of(key, constants)
+                    if label == cert_label:
+                        private_key = key
+                        break
 
         # 4. Si llegamos aqui sin clave, el cert no es firmable
         if private_key is None:
