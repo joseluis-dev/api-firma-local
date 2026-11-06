@@ -239,3 +239,93 @@ def test_expired_bearer_can_repair_and_retry_using_existing_contract(frontend_cl
     retry = client.post(endpoint, headers=headers(authorization["token"]), json=payload)
     assert retry.status_code == 200
     assert len(calls) == 1
+
+
+def _pairing_request(client):
+    return client.post("/api/v1/pairing/request", headers={"Origin": ORIGIN}, json={
+        "origin": ORIGIN, "scopes": [SCOPE_CERT_LIST, SCOPE_PDF_SIGN],
+    })
+
+
+def test_pairing_confirm_cannot_self_approve_when_native_ui_did_not_answer(frontend_client):
+    client, bearer, service = frontend_client
+    manager = deps.pairing_manager
+    assert manager._approval_callback is None  # no native UI available (Tk failure / no callback)
+    created = _pairing_request(client)
+    assert created.status_code == 200
+    body = created.json()
+    assert body["status"] == "pending" and set(body) >= {"requestId", "origin", "scopes", "instructions"}
+    assert "pairing/confirm" not in body["instructions"]  # self-confirmation is no longer advertised
+    tokens_before = len(manager.list_tokens())
+
+    confirm = client.post("/api/v1/pairing/confirm", headers={"Origin": ORIGIN}, json={
+        "requestId": body["requestId"], "approve": True,
+    })
+    assert confirm.status_code == 403
+    assert "token" not in confirm.json() and set(confirm.json()) == {"code", "message", "details"}
+    assert manager.get_request(body["requestId"]).status == "pending"
+    assert len(manager.list_tokens()) == tokens_before  # no bearer was issued
+
+
+def test_pairing_confirm_unknown_request_keeps_not_found_response(frontend_client):
+    client, bearer, service = frontend_client
+    confirm = client.post("/api/v1/pairing/confirm", headers={"Origin": ORIGIN}, json={
+        "requestId": "does-not-exist", "approve": True,
+    })
+    assert confirm.status_code == 404
+    assert confirm.json()["message"] == "Solicitud de emparejamiento expirada o invalida."
+
+
+def test_pairing_confirm_can_still_deny_a_pending_request(frontend_client):
+    client, bearer, service = frontend_client
+    manager = deps.pairing_manager
+    request_id = _pairing_request(client).json()["requestId"]
+    denied = client.post("/api/v1/pairing/confirm", headers={"Origin": ORIGIN}, json={
+        "requestId": request_id, "approve": False,
+    })
+    assert denied.status_code == 200 and denied.json() == {"ok": True}
+    assert manager.get_request(request_id).status == "denied"
+
+
+def test_pairing_request_denied_in_native_ui_does_not_leave_a_pending_request(frontend_client):
+    client, bearer, service = frontend_client
+    manager = deps.pairing_manager
+    manager.set_approval_callback(lambda origin, scopes: False)
+    response = _pairing_request(client)
+    assert response.status_code == 400 and response.json()["code"] == "USER_CANCELLED"
+    assert manager.list_pending() == []
+    assert [r.status for r in manager._data.requests][-1] == "denied"
+    assert len(manager.list_tokens()) == 1  # only the fixture's token
+
+
+def test_pairing_request_approved_in_native_ui_still_returns_token(frontend_client):
+    client, bearer, service = frontend_client
+    manager = deps.pairing_manager
+    manager.set_approval_callback(lambda origin, scopes: True)
+    response = _pairing_request(client)
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "approved" and body["token"]
+    assert set(body) == {"requestId", "status", "origin", "scopes", "token", "expiresAt", "installationId"}
+    # The request is consumed: the HTTP confirm endpoint cannot be used to replay it.
+    replay = client.post("/api/v1/pairing/confirm", headers={"Origin": ORIGIN}, json={
+        "requestId": body["requestId"], "approve": True,
+    })
+    assert replay.status_code == 404
+
+
+def test_signing_forwards_the_bearer_origin_to_the_service(frontend_client):
+    client, bearer, service = frontend_client
+    response = client.post("/api/v1/firmar/pdf", headers=headers(bearer), json=signing_payload({}))
+    assert response.status_code == 200
+    assert service.last_signature_request["origin"] == ORIGIN
+
+
+def test_signing_without_pairing_uses_no_origin(frontend_client, monkeypatch):
+    client, bearer, service = frontend_client
+    monkeypatch.setattr(config_store, "_data", UserConfig(dev_mode=True, require_pairing=False))
+    request_headers = headers(bearer)
+    del request_headers["Authorization"]
+    response = client.post("/api/v1/firmar/pdf", headers=request_headers, json=signing_payload({}))
+    assert response.status_code == 200
+    assert service.last_signature_request["origin"] is None

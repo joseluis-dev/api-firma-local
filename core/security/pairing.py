@@ -12,9 +12,11 @@ se genera aleatorio en cada arranque y los tokens emparejados se
 invalidan (ventana de aprobacion manual por origen en cada sesion).
 
 Flujo:
-    POST /api/v1/pairing/request  { origin }  -> { pending: true }
-    -> ventana nativa de aprobacion
-    -> POST /api/v1/pairing/confirm { request_id, approve }  -> { token }
+    POST /api/v1/pairing/request  { origin }  -> { token } (aprobado) o { pending }
+    -> ventana nativa de aprobacion (unica via para aprobar)
+    -> POST /api/v1/pairing/confirm { request_id, approve }  -> solo finaliza
+       solicitudes ya aprobadas por el usuario en la ventana nativa; el
+       solicitante no puede aprobarse a si mismo (approve=false si deniega).
 
 Los tokens viven en ``%LOCALAPPDATA%\\GadSign\\LocalAPI\\pairing.json``.
 """
@@ -185,6 +187,9 @@ class PairingManager:
         self._data: PairingStoreData = self._load()
         self._secret: bytes = self._ensure_secret()
         self._approval_callback = None  # type: ignore[var-annotated]
+        # Solicitudes que el usuario local aprobo en la UI nativa y que aun
+        # no se finalizaron. Solo en memoria: nunca se persiste ni se expone.
+        self._native_approved: set = set()
 
     # ------------------------------------------------------------------
     # Persistencia
@@ -258,8 +263,10 @@ class PairingManager:
         """Invoca la UI nativa de aprobacion si esta registrada.
 
         Devuelve True/False si la UI respondio, o None si no hay callback
-        o si la solicitud no esta pendiente. NO muta el estado: el caller
-        debe llamar luego ``approve_request`` o ``deny_request``.
+        o si la solicitud no esta pendiente. NO cambia el estado de la
+        solicitud: el caller debe llamar luego ``approve_request`` o
+        ``deny_request``. Una respuesta True queda registrada en memoria
+        para que solo ese resultado habilite ``approve_request_confirmed``.
         """
         if not self._approval_callback:
             return None
@@ -272,6 +279,9 @@ class PairingManager:
         except Exception as exc:
             log.warning("approval callback fallo: %s", exc)
             return None
+        if result is True:
+            with self._lock:
+                self._native_approved.add(request_id)
         return result
 
     def request_pairing(self, origin: str, requested_scopes: List[str]) -> PairingRequest:
@@ -317,10 +327,25 @@ class PairingManager:
                     return r
             return None
 
+    def approve_request_confirmed(
+        self, request_id: str, ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS
+    ) -> Optional[PairingToken]:
+        """Aprueba solo una solicitud que el usuario ya acepto en la UI nativa.
+
+        Es la unica via permitida para finalizar una aprobacion originada en
+        HTTP (``/pairing/confirm``): el solicitante nunca puede aprobarse a
+        si mismo. Devuelve None si la UI nativa no aprobo ese ``request_id``.
+        """
+        with self._lock:
+            if request_id not in self._native_approved:
+                return None
+            return self.approve_request(request_id, ttl_seconds)
+
     def approve_request(
         self, request_id: str, ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS
     ) -> Optional[PairingToken]:
         with self._lock:
+            self._native_approved.discard(request_id)
             req = self.get_request(request_id)
             if not req or req.status != "pending":
                 return None
@@ -335,6 +360,7 @@ class PairingManager:
 
     def deny_request(self, request_id: str) -> bool:
         with self._lock:
+            self._native_approved.discard(request_id)
             req = self.get_request(request_id)
             if not req or req.status != "pending":
                 return False
@@ -460,6 +486,7 @@ class PairingManager:
         with self._lock:
             self._data.tokens.clear()
             self._data.requests.clear()
+            self._native_approved.clear()
             self._save()
 
     # ------------------------------------------------------------------
@@ -474,6 +501,7 @@ class PairingManager:
         for r in self._data.requests:
             if r.status == "pending" and (time.time() - r.created_at) > DEFAULT_REQUEST_TTL_SECONDS:
                 r.status = "expired"
+                self._native_approved.discard(r.request_id)
 
 
 pairing_manager = PairingManager()

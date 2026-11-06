@@ -42,11 +42,17 @@ log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Cache de PIN en memoria, por token.
+# Cache de PIN en memoria, por token Y por origen solicitante.
 # - Solo dura ``PIN_CACHE_TTL_SECONDS`` para reducir la ventana de exposicion.
-# - Se invalida ante PIN_INVALID / TOKEN_LOCKED / timeout / cancelacion.
-# - Un lock por token evita dos dialogos de PIN simultaneos.
+# - Un PIN escrito para un origen NO se reutiliza para otro origen: cada
+#   origen emparejado debe haber visto su propio dialogo de PIN.
+# - Se invalida ante PIN_INVALID / TOKEN_LOCKED / timeout / cancelacion
+#   (para todos los origenes del token).
+# - Un lock por token (no por origen) evita dos dialogos de PIN simultaneos.
 # ---------------------------------------------------------------------------
+
+# Componente de clave cuando no hay origen (``require_pairing`` desactivado).
+NO_ORIGIN = "-"
 
 
 class _PinCache:
@@ -54,37 +60,42 @@ class _PinCache:
         self._ttl = ttl_seconds
         self._lock = threading.Lock()
         self._entry_lock = threading.Lock()
-        self._data: dict[str, tuple[str, float]] = {}
+        # (token_key, origin) -> (pin, instante monotonico)
+        self._data: dict[tuple[str, str], tuple[str, float]] = {}
+        self._locks: dict[str, threading.Lock] = {}
 
-    def get(self, key: str) -> Optional[str]:
+    def _purge_expired_locked(self) -> None:
+        now = time.monotonic()
+        for key in [k for k, (_pin, ts) in self._data.items() if now - ts > self._ttl]:
+            self._data.pop(key, None)
+
+    def get(self, token_key: str, origin: str = NO_ORIGIN) -> Optional[str]:
         if self._ttl <= 0:
             return None
         with self._lock:
-            entry = self._data.get(key)
-            if not entry:
-                return None
-            pin, ts = entry
-            if time.monotonic() - ts > self._ttl:
-                self._data.pop(key, None)
-                return None
-            return pin
+            self._purge_expired_locked()
+            entry = self._data.get((token_key, origin))
+            return entry[0] if entry else None
 
-    def put(self, key: str, pin: str) -> None:
+    def put(self, token_key: str, origin: str, pin: str) -> None:
         if self._ttl <= 0:
             return
         with self._lock:
-            self._data[key] = (pin, time.monotonic())
+            self._purge_expired_locked()
+            self._data[(token_key, origin)] = (pin, time.monotonic())
 
-    def invalidate(self, key: str) -> None:
+    def invalidate(self, token_key: str) -> None:
+        """Descarta los PIN en cache de ese token para todos los origenes."""
         with self._lock:
-            self._data.pop(key, None)
+            for key in [k for k in self._data if k[0] == token_key]:
+                self._data.pop(key, None)
 
-    def entry_lock(self, key: str) -> threading.Lock:
+    def entry_lock(self, token_key: str) -> threading.Lock:
         with self._entry_lock:
-            lock = self._data.get(("__lock__", key))
+            lock = self._locks.get(token_key)
             if lock is None:
                 lock = threading.Lock()
-                self._data[("__lock__", key)] = lock  # type: ignore[assignment]
+                self._locks[token_key] = lock
             return lock
 
 
@@ -182,6 +193,7 @@ def _capture_pin(
     inline_pin: Optional[str],
     token_label: str,
     cache_key: Optional[str] = None,
+    origin: str = NO_ORIGIN,
 ) -> str:
     if pin_mode == "INLINE":
         if not inline_pin:
@@ -189,13 +201,13 @@ def _capture_pin(
         return inline_pin
     if pin_mode == "LOCAL_PROMPT":
         if cache_key:
-            cached = _pin_cache.get(cache_key)
+            cached = _pin_cache.get(cache_key, origin)
             if cached is not None:
-                log.debug("PIN servido desde cache (token=%s)", token_label)
+                log.debug("PIN servido desde cache (token=%s origin=%s)", token_label, origin)
                 return cached
         pin = ask_pin(token_label)
         if cache_key and pin:
-            _pin_cache.put(cache_key, pin)
+            _pin_cache.put(cache_key, origin, pin)
         return pin
     if pin_mode == "NONE":
         return ""
@@ -245,23 +257,36 @@ class TokenService:
     def _cache_key(provider: str, token_label: str) -> str:
         return f"{provider.upper()}|{token_label}"
 
+    @staticmethod
+    def _pin_origin(origin: Optional[str]) -> str:
+        """Normaliza el origen para la clave del cache de PIN."""
+        normalized = (origin or "").strip().rstrip("/").lower()
+        return normalized or NO_ORIGIN
+
     def _capture_pin_cached(
         self,
         pin_mode: str,
         inline_pin: Optional[str],
         provider: str,
         token_label: str,
+        origin: Optional[str] = None,
     ) -> str:
         """Captura el PIN serializando dialogos concurrentes por token.
 
         Si otro hilo esta pidiendo el PIN del mismo token, espera a que
-        termine y reusa el resultado.
+        termine; el PIN en cache solo se reusa para el mismo origen.
         """
         cache_key = self._cache_key(provider, token_label) if pin_mode == "LOCAL_PROMPT" else None
         lock = _pin_cache.entry_lock(cache_key or "__noprompt__")
 
         with lock:
-            return _capture_pin(pin_mode, inline_pin, token_label, cache_key=cache_key)
+            return _capture_pin(
+                pin_mode,
+                inline_pin,
+                token_label,
+                cache_key=cache_key,
+                origin=self._pin_origin(origin),
+            )
 
     def _capture_pin_for_driver(
         self,
@@ -269,14 +294,16 @@ class TokenService:
         inline_pin: Optional[str],
         driver: TokenDriver,
         token_label: str,
+        origin: Optional[str] = None,
     ) -> str:
         """Captura PIN usando la identidad real del driver para el cache.
 
         Esto evita que un mismo token con providers logicos distintos
-        (AUTO vs SAFENET) tenga caches de PIN separados.
+        (AUTO vs SAFENET) tenga caches de PIN separados. El ``origin``
+        (del bearer emparejado) acota el cache a quien escribio el PIN.
         """
         return self._capture_pin_cached(
-            pin_mode, inline_pin, driver.provider_id, token_label
+            pin_mode, inline_pin, driver.provider_id, token_label, origin
         )
 
     def list_certificates(
@@ -340,6 +367,7 @@ class TokenService:
         metadata_b64: Optional[str],
         request_timeout_s: int,
         sign_timeout_s: Optional[int] = None,
+        origin: Optional[str] = None,
     ) -> FirmarPdfResponse:
         # 1. Decodificar y validar PDF
         try:
@@ -475,7 +503,7 @@ class TokenService:
             try:
                 pin = _run_with_timeout(
                     lambda: self._capture_pin_for_driver(
-                        pin_mode, inline_pin, driver, token_label
+                        pin_mode, inline_pin, driver, token_label, origin
                     ),
                     request_timeout_s,
                 )

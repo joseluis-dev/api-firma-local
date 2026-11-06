@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from typing import List, Optional
 
@@ -18,6 +19,7 @@ from ..config_store import config_store
 from ..errors import DriverNotFoundError
 from .base import TokenDriver
 from .mock_driver import MockDriver
+from .module_guard import validate_module_path
 from .pcsc_driver import PcscDriver
 from .pkcs11_driver import Pkcs11Driver
 
@@ -127,15 +129,39 @@ def _resolve_module(candidates: List[str], *, allow_global_fallback: bool = True
     for c in candidates:
         if _module_exists(c):
             return c
-    dcfg = _driver_config()
-    if allow_global_fallback and dcfg.pkcs11_module_path and _module_exists(
-        dcfg.pkcs11_module_path
-    ):
-        return dcfg.pkcs11_module_path
+    if not allow_global_fallback:
+        return None
+    # La ruta configurada por el usuario es editable: solo se acepta si
+    # es una DLL dentro de un directorio protegido (ver module_guard).
+    configured = _driver_config().pkcs11_module_path
+    if configured:
+        return validate_module_path(configured)
     return None
 
 
+def _mock_enabled() -> bool:
+    """MOCK solo se usa si esta configurado Y no es un build empaquetado.
+
+    Una config con ``mock_driver=true`` heredada en una instalacion
+    empaquetada se ignora, para que AUTO siga hacia el modulo real.
+    """
+    if not _driver_config().mock_driver:
+        return False
+    if getattr(sys, "frozen", False):
+        log.warning("mock_driver=true ignorado: el driver MOCK no se usa en builds empaquetados.")
+        return False
+    return True
+
+
 def _build_mock() -> TokenDriver:
+    # El MOCK usa un PIN fijo y devuelve una "firma" que no es PAdES: jamas
+    # debe activarse en un build empaquetado, aunque la config lo pida.
+    if getattr(sys, "frozen", False):
+        log.error(
+            "Se solicito el driver MOCK en un build empaquetado; se rechaza. "
+            "Revise mock_driver / MOCK_DRIVER en la configuracion."
+        )
+        raise DriverNotFoundError("Driver MOCK no disponible en esta instalacion.")
     return MockDriver()
 
 
@@ -153,7 +179,13 @@ def _build_pkcs11() -> TokenDriver:
         raise DriverNotFoundError(
             "PKCS11_MODULE_PATH vacio. Define la ruta al modulo del fabricante."
         )
-    return Pkcs11Driver(module_path)
+    trusted_path = validate_module_path(module_path)
+    if not trusted_path:
+        raise DriverNotFoundError(
+            "PKCS11_MODULE_PATH no es valido: debe ser una DLL existente dentro de "
+            "un directorio protegido del sistema (System32, SysWOW64, Program Files)."
+        )
+    return Pkcs11Driver(trusted_path)
 
 
 def list_available_providers() -> List[dict]:
@@ -198,7 +230,7 @@ def get_driver(provider: str, tipo: str = "TOKEN") -> TokenDriver:
 
     # 2. AUTO sin driver real -> mock si esta habilitado
     if provider == "AUTO":
-        if not has_real_driver() and _driver_config().mock_driver:
+        if not has_real_driver() and _mock_enabled():
             log.info("Sin driver real; usando MOCK (desarrollo).")
             return _build_mock()
 

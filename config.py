@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     )
     default_provider: str = Field(default="AUTO")
     default_pin_mode: str = Field(default="LOCAL_PROMPT")
-    mock_driver: bool = Field(default=True)
+    mock_driver: bool = Field(default=False)
     pkcs11_module_path: str = Field(default="")
     pcsc_reader_index: int = Field(default=0)
 

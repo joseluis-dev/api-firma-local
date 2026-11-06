@@ -2,7 +2,7 @@
 
 - GET  /api/v1/health
 - POST /api/v1/pairing/request   (publico, requiere Origin)
-- POST /api/v1/pairing/confirm   (publico)
+- POST /api/v1/pairing/confirm   (publico; solo finaliza aprobaciones hechas en la UI nativa)
 - GET  /api/v1/pairing/status    (publico)
 - POST /api/v1/certificados      (requiere Bearer)
 - POST /api/v1/firmar/pdf        (requiere Bearer + confirmacion nativa)
@@ -22,6 +22,7 @@ from ..config import settings
 from ..core.config_store import config_store
 from ..core.errors import ErrorCode, LocalApiError
 from ..core.errors import (
+    AuthForbiddenError,
     AuthRequiredError,
     OriginNotAllowedError,
     UserCancelledError,
@@ -238,19 +239,23 @@ def pairing_request(req: PairingRequestIn, request: Request):
                     "installationId": tok.installation_id,
                 }
         if approved_via_ui is False:
+            # El usuario rechazo: la solicitud no debe quedar pendiente.
+            pairing_manager.deny_request(pr.request_id)
             return _error_response(
                 UserCancelledError("El usuario cancelo la aprobacion de emparejamiento.")
             )
-        # Si la UI no respondio, devolvemos pending para que el frontend
-        # pueda hacer polling via /pairing/status o llamar /pairing/confirm.
+        # Si la UI no respondio, devolvemos pending. La aprobacion solo
+        # puede darla el usuario en la ventana nativa del sistema: el
+        # solicitante no puede autoaprobarse via /pairing/confirm.
         return {
             "requestId": pr.request_id,
             "origin": pr.origin,
             "scopes": pr.scopes,
             "status": pr.status,
             "instructions": (
-                "Revise la ventana de aprobacion del sistema. Si no aparece, "
-                "use POST /api/v1/pairing/confirm con el requestId."
+                "Revise la ventana de aprobacion del sistema. La solicitud "
+                "solo puede ser aprobada por el usuario en esa ventana; si "
+                "no aparece, vuelva a solicitar el emparejamiento."
             ),
         }
     except LocalApiError as exc:
@@ -264,8 +269,22 @@ def pairing_confirm(req: PairingConfirmIn, request: Request):
     _check_rate(request, "/pairing/confirm")
     try:
         if req.approve:
-            tok = pairing_manager.approve_request(req.requestId)
+            # Solo se finaliza lo que el usuario ya aprobo en la UI nativa.
+            tok = pairing_manager.approve_request_confirmed(req.requestId)
             if not tok:
+                pending = pairing_manager.get_request(req.requestId)
+                if pending is not None and pending.status == "pending":
+                    log.warning(
+                        "pairing/confirm approve=true rechazado: la solicitud %s "
+                        "no fue aprobada en la UI nativa.",
+                        req.requestId,
+                    )
+                    return _error_response(
+                        AuthForbiddenError(
+                            "La solicitud solo puede ser aprobada por el usuario "
+                            "en la ventana nativa del sistema."
+                        )
+                    )
                 return _error_response(
                     LocalApiError(
                         "Solicitud de emparejamiento expirada o invalida.",
@@ -411,6 +430,9 @@ def firmar_pdf(
             metadata_b64=req.metadataBase64,
             request_timeout_s=_rq_timeout(),
             sign_timeout_s=_sign_timeout(),
+            # Origen autenticado del bearer: acota el cache de PIN. Es None
+            # si ``require_pairing`` esta desactivado.
+            origin=getattr(_tok, "origin", None),
         )
     except LocalApiError as exc:
         log.info("RESP /firmar/pdf %s: %s", exc.status_code, getattr(exc.code, "value", exc.code))

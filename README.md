@@ -79,8 +79,8 @@ interactiva en `http://127.0.0.1:44113/api/v1/docs`.
 | `ALLOWED_ORIGIN` | `http://localhost:3000` | Origen CORS. |
 | `DEFAULT_PROVIDER` | `AUTO` | `AUTO`, `MOCK`, `PKCS11`, `PCSC`. |
 | `DEFAULT_PIN_MODE` | `LOCAL_PROMPT` | `LOCAL_PROMPT`, `INLINE`, `NONE`. |
-| `MOCK_DRIVER` | `true` | Usar driver mock cuando este disponible. |
-| `PKCS11_MODULE_PATH` | (vacio) | Ruta al modulo PKCS#11 del fabricante. |
+| `MOCK_DRIVER` | `false` | Habilita el driver mock (solo desarrollo; nunca en builds empaquetados). |
+| `PKCS11_MODULE_PATH` | (vacio) | Ruta al modulo PKCS#11 del fabricante. Debe ser una `.dll` hija directa de System32/SysWOW64 o estar en Program Files, y no ser modificable por usuarios estandar; otras rutas se ignoran. |
 | `PCSC_READER_INDEX` | `0` | Indice del lector PCSC. |
 
 ## Endpoints

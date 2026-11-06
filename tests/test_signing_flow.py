@@ -227,3 +227,156 @@ def test_stamp_text_stays_inside_the_firmaec_size(monkeypatch, name):
     assert image.size == (440, 144)  # 110 x 36 PDF points at 288 DPI.
     assert bounds
     assert all(144 <= x1 <= x2 < 440 and 0 <= y1 <= y2 < 144 for x1, y1, x2, y2 in bounds)
+
+
+# ---------------------------------------------------------------------------
+# PIN cache bound to the requesting origin
+# ---------------------------------------------------------------------------
+
+ORIGIN_A = "https://a.salcedo.gob.ec"
+ORIGIN_B = "https://b.salcedo.gob.ec"
+
+
+@pytest.fixture
+def pin_env(monkeypatch):
+    """Isolated PIN cache plus a counting ``ask_pin`` that never opens a dialog."""
+    import threading
+    import time
+
+    cache = service_module._PinCache(ttl_seconds=120)
+    monkeypatch.setattr(service_module, "_pin_cache", cache)
+    state = SimpleNamespace(prompts=0, active=0, max_active=0, lock=threading.Lock(), delay=0.0)
+
+    def ask_pin(token_label):
+        with state.lock:
+            state.prompts += 1
+            state.active += 1
+            state.max_active = max(state.max_active, state.active)
+        time.sleep(state.delay)
+        with state.lock:
+            state.active -= 1
+        return "123456"
+
+    monkeypatch.setattr(service_module, "ask_pin", ask_pin)
+    driver = SimpleNamespace(provider_id="PKCS11")
+    return service_module.TokenService(), driver, cache, state
+
+
+def test_pin_cache_entries_are_bound_to_origin():
+    cache = service_module._PinCache(ttl_seconds=120)
+    cache.put("PKCS11|Token", ORIGIN_A, "111111")
+    assert cache.get("PKCS11|Token", ORIGIN_A) == "111111"
+    assert cache.get("PKCS11|Token", ORIGIN_B) is None
+    assert cache.get("OTHER|Token", ORIGIN_A) is None
+
+
+def test_same_origin_reuses_cached_pin_within_ttl(pin_env):
+    service, driver, cache, state = pin_env
+    for _ in range(3):
+        assert service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_A) == "123456"
+    assert state.prompts == 1
+
+
+def test_another_origin_must_prompt_again_for_the_same_token(pin_env):
+    service, driver, cache, state = pin_env
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_A)
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_B)
+    assert state.prompts == 2
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_A)
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_B)
+    assert state.prompts == 2  # each origin keeps its own entry
+
+
+def test_origin_is_normalized_and_missing_origin_uses_a_fixed_key(pin_env):
+    service, driver, cache, state = pin_env
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_A)
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", ORIGIN_A.upper() + "/")
+    assert state.prompts == 1
+    # require_pairing disabled: no origin available, behaves like the old token-wide cache.
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token")
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", None)
+    service._capture_pin_for_driver("LOCAL_PROMPT", None, driver, "Token", "")
+    assert state.prompts == 2
+
+
+def test_pin_dialogs_stay_serialized_per_token_across_origins(pin_env):
+    import threading
+
+    service, driver, cache, state = pin_env
+    state.delay = 0.15
+    threads = [
+        threading.Thread(
+            target=service._capture_pin_for_driver,
+            args=("LOCAL_PROMPT", None, driver, "Token", origin),
+        )
+        for origin in (ORIGIN_A, ORIGIN_B)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(5)
+    assert state.prompts == 2
+    assert state.max_active == 1  # never two PIN dialogs at once for the same token
+    assert cache.entry_lock("PKCS11|Token") is cache.entry_lock("PKCS11|Token")
+
+
+def test_pin_cache_purges_expired_entries_on_get_and_put():
+    import time
+
+    cache = service_module._PinCache(ttl_seconds=10)
+    stale = time.monotonic() - 100
+    cache._data[("T1", ORIGIN_A)] = ("old-1", stale)
+    cache._data[("T2", ORIGIN_A)] = ("old-2", stale)
+    cache._data[("T3", ORIGIN_A)] = ("old-3", stale)
+    assert cache.get("T1", ORIGIN_B) is None
+    assert set(cache._data) == set()  # a get() sweeps every expired entry, not only its own
+    cache._data[("T4", ORIGIN_A)] = ("old-4", stale)
+    cache.put("T5", ORIGIN_A, "fresh")
+    assert set(cache._data) == {("T5", ORIGIN_A)}
+
+
+def test_pin_cache_disabled_when_ttl_is_zero():
+    cache = service_module._PinCache(ttl_seconds=0)
+    cache.put("T", ORIGIN_A, "111111")
+    assert cache.get("T", ORIGIN_A) is None
+
+
+def test_pin_errors_invalidate_the_token_for_every_origin(monkeypatch):
+    cache = service_module._PinCache(ttl_seconds=120)
+    monkeypatch.setattr(service_module, "_pin_cache", cache)
+    cache.put("PKCS11|Token", ORIGIN_A, "111111")
+    cache.put("PKCS11|Token", ORIGIN_B, "222222")
+    cache.put("PKCS11|Other", ORIGIN_A, "333333")
+    service_module.TokenService._invalidate_pin_on_error(PinInvalidError("bad"), "PKCS11|Token")
+    assert cache.get("PKCS11|Token", ORIGIN_A) is None
+    assert cache.get("PKCS11|Token", ORIGIN_B) is None
+    assert cache.get("PKCS11|Other", ORIGIN_A) == "333333"
+
+
+def test_sign_pdf_binds_pin_capture_to_the_requesting_origin(monkeypatch, fake_token):
+    driver, events, searches, cert_der, pdf = fake_token
+    service = service_module.TokenService()
+    cache = service_module._CertCache()
+    cache._data["PKCS11|Test Token"] = [{
+        "id": "Signing Certificate", "signable": True, "shortName": "Test Signer",
+        "validFrom": datetime.now(timezone.utc), "validTo": datetime.now(timezone.utc),
+    }]
+    monkeypatch.setattr(service_module, "_cert_cache", cache)
+    monkeypatch.setattr(service_module, "get_driver", lambda *args: driver)
+    captured = []
+
+    def capture(*args):
+        captured.append(args)
+        return "test-pin"
+
+    monkeypatch.setattr(service, "_capture_pin_for_driver", capture)
+    placement = {"rectangulo": {"lowerLeftX": 320, "lowerLeftY": 110, "upperRightX": 490, "upperRightY": 174}}
+    for origin in (ORIGIN_A, None):
+        extra = {} if origin is None else {"origin": origin}
+        service.sign_pdf(
+            documento_base64=encode_base64(pdf), documento_sha256=sha256_hex(pdf),
+            certificado_id="Signing Certificate", provider="SAFENET", tipo="TOKEN",
+            pin_mode="LOCAL_PROMPT", inline_pin=None, metadata_b64=None,
+            firma_params=placement, request_timeout_s=5, sign_timeout_s=5, **extra,
+        )
+    assert [args[-1] for args in captured] == [ORIGIN_A, None]
